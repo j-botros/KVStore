@@ -6,6 +6,8 @@ import (
 	"log"
 	"net/http"
 	"os"
+
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	// "kvstore/pkg/kvstore"
 )
 
@@ -52,12 +54,14 @@ func main() {
 			"service": "kvstore",
 			"status": "running",
 			"endpoints": {
-				"GET /get?key=foo": "retrieve value",
-				"POST /set": "set key/value",
-				"DELETE /delete?key=foo": "delete key"
+				"GET /kv/{key}": "retrieve value",
+				"POST /kv/{key}": "set key/value",
+				"DELETE /kv/{key}": "delete key"
 			}
 		}`))
 	})
+
+	http.Handle("/metrics", promhttp.Handler())
 
 	// Configure HTTP server port
 	portStr := fmt.Sprintf(":%d", config.Port)

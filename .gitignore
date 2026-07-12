@@ -1,0 +1,30 @@
+# macOS
+.DS_Store
+
+# Go build outputs
+/bin/
+/dist/
+*.exe
+*.out
+
+# Compiled binaries (project-specific)
+kvstore
+
+# Go test cache & coverage
+*.test
+*.coverprofile
+coverage.out
+
+# Go workspace (if not intentionally committed)
+go.work
+go.work.sum
+
+# Environment / config overrides
+*.env
+.env.*
+
+# Editor & IDE
+.vscode/
+.idea/
+*.swp
+*.swo

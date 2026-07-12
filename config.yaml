@@ -1,0 +1,38 @@
+server:
+  node_id: kvstore-0
+  http_port: 8080
+  grpc_port: 9090
+  data_dir: /data
+
+storage:
+  memtable_size_mb: 64
+  wal_segment_size_mb: 64
+  level0_max_files: 4
+  level1_max_size_mb: 256
+  level_size_multiplier: 10
+
+cluster:
+  nodes:
+    - id: kvstore-0
+      grpc_addr: kvstore-0.kvstore-headless:9090
+    - id: kvstore-1
+      grpc_addr: kvstore-1.kvstore-headless:9090
+    - id: kvstore-2
+      grpc_addr: kvstore-2.kvstore-headless:9090
+
+  shards:
+    - id: shard-1
+      start_key: A
+      end_key: H
+      leader: kvstore-0
+      followers:
+        - kvstore-1
+        - kvstore-2
+
+    - id: shard-2
+      start_key: I
+      end_key: P
+      leader: kvstore-1
+      followers:
+        - kvstore-0
+        - kvstore-2
