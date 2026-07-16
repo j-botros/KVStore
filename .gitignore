@@ -8,7 +8,7 @@
 *.out
 
 # Compiled binaries (project-specific)
-kvstore
+/kvstore
 
 # Go test cache & coverage
 *.test
