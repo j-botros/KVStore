@@ -3,14 +3,14 @@ package storageengine
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"hash/crc32"
 	"io"
 	"os"
-	"strconv"
 )
 
 type StorageEngine struct {
-	memtable Memtable
+	memtable memtable
 	metadata metadata
 	nextSeq  uint64
 }
@@ -19,9 +19,9 @@ type StorageEngine struct {
 	STORAGE (CRUD) METHODS
 ==================================================================================== */
 
-func (e *StorageEngine) Get(key string) ([]byte, error) {
+func (e *StorageEngine) Get(key string) (value []byte, err error) {
 	// Search Memtable for key-value
-	value, err := e.memtable.Get(key)
+	value, err = e.memtable.Get(key)
 	if err == nil {
 		return value, err
 	} else if err != ErrKeyNotFound {
@@ -67,14 +67,15 @@ func (e *StorageEngine) Delete(key string) error {
 
 type metadata struct {
 	NextFileNumber uint64
-	Wal            wal
-	Sstables       sstables
+	Wal            *wal
+	Sstables       *sstables
+	crcTable       *crc32.Table
 }
 
 type wal struct {
 	LogNumber     uint64
 	LastSeq       uint64
-	capacityBytes uintptr
+	capacityBytes uintptr // TODO: Track size of file
 	crcTable      *crc32.Table
 }
 
@@ -88,7 +89,8 @@ func NewWal(logNumber uint64, lastSeq uint64, capacityBytes uintptr) *wal {
 }
 
 func (wal *wal) WriteLog(key string, value []byte, tombstone bool, seq uint64) error {
-	filename := "data/wal/" + strconv.FormatUint(wal.LogNumber, 10) + ".log"
+	filename := fmt.Sprintf("data/wal/%d.log", wal.LogNumber)
+
 	walFile, err := os.OpenFile(
 		filename,
 		os.O_WRONLY|os.O_APPEND|os.O_CREATE,
@@ -150,15 +152,4 @@ func (wal *wal) WriteLog(key string, value []byte, tombstone bool, seq uint64) e
 
 	wal.LastSeq = seq
 	return nil
-}
-
-type sstables struct {
-	levels uint
-	sst    [][]uint64
-}
-
-func (sstables *sstables) Get(key string) ([]byte, error) {
-	// TODO: Search SSTables
-
-	return nil, ErrKeyNotFound
 }

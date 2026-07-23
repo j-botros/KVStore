@@ -28,16 +28,16 @@ func newNode(key string, value []byte, level int, seq uint64, tombstone bool) *n
 	}
 }
 
-type Memtable struct {
+type memtable struct {
 	head          *node
 	height        int
 	capacityBytes uintptr
 	sizeBytes     uintptr
 }
 
-func NewMemtable(capacityBytes uintptr) *Memtable {
+func newMemtable(capacityBytes uintptr) *memtable {
 	node := newNode("", nil, MAX_LEVELS, 0, false)
-	return &Memtable{
+	return &memtable{
 		head:          node,
 		height:        1,
 		capacityBytes: capacityBytes,
@@ -45,7 +45,7 @@ func NewMemtable(capacityBytes uintptr) *Memtable {
 	}
 }
 
-func (m *Memtable) Get(key string) ([]byte, error) {
+func (m *memtable) Get(key string) (value []byte, err error) {
 	curr := m.head
 	for l := m.height - 1; l >= 0; l-- {
 		for curr.Next[l] != nil && curr.Next[l].Key < key {
@@ -63,7 +63,7 @@ func (m *Memtable) Get(key string) ([]byte, error) {
 	return nil, ErrKeyNotFound
 }
 
-func (m *Memtable) Insert(key string, value []byte, seq uint64) {
+func (m *memtable) Insert(key string, value []byte, seq uint64) {
 	// Track predecessors at each level
 	prevs := [MAX_LEVELS]*node{}
 	for i := range prevs {
@@ -106,7 +106,7 @@ func (m *Memtable) Insert(key string, value []byte, seq uint64) {
 	m.sizeBytes += unsafe.Sizeof(*node) + uintptr(len(key)) + uintptr(len(value))
 }
 
-func (m *Memtable) Delete(key string, seq uint64) {
+func (m *memtable) Delete(key string, seq uint64) {
 	// Track predecessors at each level
 	prevs := [MAX_LEVELS]*node{}
 	for i := range prevs {
@@ -147,7 +147,7 @@ func (m *Memtable) Delete(key string, seq uint64) {
 	m.sizeBytes += unsafe.Sizeof(*tombstone) + uintptr(len(key))
 }
 
-func (m *Memtable) randomLevel() int {
+func (m *memtable) randomLevel() int {
 	level := 1
 	for rand.Float64() < 0.5 && level < MAX_LEVELS {
 		level++
