@@ -10,7 +10,7 @@ type bloomFilter struct {
 	numKeys   uint
 }
 
-func NewBloomFilter(numKeys uint) *bloomFilter {
+func newBloomFilter(numKeys uint) *bloomFilter {
 	return &bloomFilter{
 		bitstring: make([]byte, (10*numKeys+7)/8),
 		numKeys:   numKeys,

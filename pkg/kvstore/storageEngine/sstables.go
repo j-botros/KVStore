@@ -15,7 +15,7 @@ type sstables struct {
 	crcTable *crc32.Table
 }
 
-func (sstables *sstables) Get(key string) (value []byte, err error) {
+func (sstables *sstables) get(key string) (value []byte, err error) {
 	for level := uint(0); level < sstables.levels; level++ {
 		for _, sst := range sstables.sstList[level] {
 			if key >= sst.startKey && key <= sst.endKey {
@@ -52,8 +52,6 @@ type sst struct {
 }
 
 func (sst *sst) search(key string) (value []byte, err error) {
-	// TODO: Search SSTables
-
 	// Check bloom filter
 	if sst.bloomFilter.keyNotPresent(key) {
 		return nil, ErrKeyNotFound
@@ -120,42 +118,35 @@ func (sst *sst) search(key string) (value []byte, err error) {
 		}
 
 		// Read: key
-		var ekey string
-
-		err = binary.Read(r, binary.LittleEndian, &ekey)
+		keyBuf := make([]byte, keyLength)
+		_, err := io.ReadFull(r, keyBuf)
 		if err != nil {
 			return nil, err
 		}
-
-		err = binary.Write(buf, binary.LittleEndian, ekey)
-		if err != nil {
-			return nil, err
-		}
+		buf.Write(keyBuf)
+		ekey := string(keyBuf)
 
 		if tombstone == 0 {
 			// Read: value length (4 bytes)
-			var valueLength uint32
+			var valLength uint32
 
-			err = binary.Read(r, binary.LittleEndian, &valueLength)
+			err = binary.Read(r, binary.LittleEndian, &valLength)
 			if err != nil {
 				return nil, err
 			}
 
-			err = binary.Write(buf, binary.LittleEndian, valueLength)
+			err = binary.Write(buf, binary.LittleEndian, valLength)
 			if err != nil {
 				return nil, err
 			}
 
 			// Read: value
-			err = binary.Read(r, binary.LittleEndian, &value)
+			value = make([]byte, valLength)
+			_, err := io.ReadFull(r, value)
 			if err != nil {
 				return nil, err
 			}
-
-			err = binary.Write(buf, binary.LittleEndian, value)
-			if err != nil {
-				return nil, err
-			}
+			buf.Write(value)
 		}
 
 		// Read: checksum (4 bytes)
@@ -185,7 +176,16 @@ type block struct {
 	length       uint64
 	prevBlockKey string
 }
-type index []block
+type index []*block
+
+func newBlock(lastKey string, offset uint64, length uint64, prevBlockKey string) *block {
+	return &block{
+		lastKey:      lastKey,
+		offset:       offset,
+		length:       length,
+		prevBlockKey: prevBlockKey,
+	}
+}
 
 func (index *index) getDatablock(key string) (offset uint64, length uint64, err error) {
 	l := 0
@@ -208,30 +208,78 @@ func (index *index) getDatablock(key string) (offset uint64, length uint64, err 
 
 const (
 	FOOTER_MAGIC = uint64(0x4c55564c49414e41)
-	FOOTER_SIZE  = 8 + 8 + 8 + 8 + 8 // Block offset + Block length + Bloom offset + Bloom length + Footer magic
+	FOOTER_SIZE  = 8 + 8 + 8 + 8 + 8 // Index offset + Index length + Bloom offset + Bloom length + Footer magic
 )
 
-func readFooter(sstFile *os.File) (blockOffset uint64, blockLength uint64, bloomOffset uint64, bloomLength uint64, err error) {
+func (sst *sst) readFooter() (index *index, bf *bloomFilter, err error) {
+	// Read from file
+	filename := fmt.Sprintf("data/sstables/level-%d/%d.sst", sst.level, sst.filenum)
+
+	sstFile, err := os.Open(filename)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer sstFile.Close()
+
 	_, err = sstFile.Seek(-FOOTER_SIZE, io.SeekEnd)
 	if err != nil {
-		return 0, 0, 0, 0, err
+		return nil, nil, err
 	}
 
 	buf := make([]byte, FOOTER_SIZE)
 	_, err = io.ReadFull(sstFile, buf)
 	if err != nil {
-		return 0, 0, 0, 0, err
+		return nil, nil, err
 	}
 
-	blockOffset = binary.LittleEndian.Uint64(buf[0:8])
-	blockLength = binary.LittleEndian.Uint64(buf[8:16])
-	bloomOffset = binary.LittleEndian.Uint64(buf[16:24])
-	bloomLength = binary.LittleEndian.Uint64(buf[24:32])
+	// Verify magic
 	magic := binary.LittleEndian.Uint64(buf[32:40])
-
 	if magic != FOOTER_MAGIC {
-		return 0, 0, 0, 0, ErrBadFile
+		return nil, nil, ErrBadFile
 	}
 
-	return blockOffset, blockLength, bloomOffset, bloomLength, nil
+	// TODO: Instantiate index
+	indexOffset := binary.LittleEndian.Uint64(buf[0:8])
+	indexLength := binary.LittleEndian.Uint64(buf[8:16])
+
+	*index = []*block{}
+	r := io.NewSectionReader(sstFile, int64(indexOffset), int64(indexLength))
+
+	var prevBlockKey string
+	prevBlockKey = ""
+	for {
+		var keyLength uint32
+		err = binary.Read(r, binary.LittleEndian, &keyLength)
+		if err == io.EOF {
+			break
+		} else if err != nil {
+			return nil, nil, err
+		}
+
+		keyBuf := make([]byte, keyLength)
+		_, err = io.ReadFull(r, keyBuf)
+		if err != nil {
+			return nil, nil, err
+		}
+		lastKey := string(keyBuf)
+
+		var offset uint64
+		err = binary.Read(r, binary.LittleEndian, &offset)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		var length uint64
+		err = binary.Read(r, binary.LittleEndian, &length)
+
+		block := newBlock(lastKey, offset, length, prevBlockKey)
+		*index = append(*index, block)
+		prevBlockKey = lastKey
+	}
+
+	// TODO: Instantiate bloom filter
+	bloomOffset := binary.LittleEndian.Uint64(buf[16:24])
+	bloomLength := binary.LittleEndian.Uint64(buf[24:32])
+
+	return index, nil, nil
 }

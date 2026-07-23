@@ -10,21 +10,21 @@ const (
 )
 
 type node struct {
-	Key       string
-	Value     []byte
-	Level     int
-	Next      [MAX_LEVELS]*node
-	Seq       uint64
-	Tombstone bool
+	key       string
+	value     []byte
+	level     int
+	next      [MAX_LEVELS]*node
+	seq       uint64
+	tombstone bool
 }
 
 func newNode(key string, value []byte, level int, seq uint64, tombstone bool) *node {
 	return &node{
-		Key:       key,
-		Value:     value,
-		Level:     level,
-		Seq:       seq,
-		Tombstone: tombstone,
+		key:       key,
+		value:     value,
+		level:     level,
+		seq:       seq,
+		tombstone: tombstone,
 	}
 }
 
@@ -48,17 +48,17 @@ func newMemtable(capacityBytes uintptr) *memtable {
 func (m *memtable) Get(key string) (value []byte, err error) {
 	curr := m.head
 	for l := m.height - 1; l >= 0; l-- {
-		for curr.Next[l] != nil && curr.Next[l].Key < key {
-			curr = curr.Next[l]
+		for curr.next[l] != nil && curr.next[l].key < key {
+			curr = curr.next[l]
 		}
 	}
 
-	curr = curr.Next[0] // step forward at level 0
-	if curr != nil && curr.Key == key {
-		if curr.Tombstone {
+	curr = curr.next[0] // step forward at level 0
+	if curr != nil && curr.key == key {
+		if curr.tombstone {
 			return nil, ErrKeyNotFound // treat tombstone as deleted
 		}
-		return curr.Value, nil
+		return curr.value, nil
 	}
 	return nil, ErrKeyNotFound
 }
@@ -72,23 +72,23 @@ func (m *memtable) Insert(key string, value []byte, seq uint64) {
 
 	curr := m.head
 	for l := m.height - 1; l >= 0; l-- {
-		for curr.Next[l] != nil && curr.Next[l].Key < key {
-			curr = curr.Next[l]
+		for curr.next[l] != nil && curr.next[l].key < key {
+			curr = curr.next[l]
 		}
 		prevs[l] = curr
 	}
 
 	// Check if the key already exists at level 0
-	curr = curr.Next[0]
-	if curr != nil && curr.Key == key {
+	curr = curr.next[0]
+	if curr != nil && curr.key == key {
 		// Update in place
-		m.sizeBytes -= unsafe.Sizeof(*curr) + uintptr(len(curr.Key)) + uintptr(len(curr.Value))
+		m.sizeBytes -= unsafe.Sizeof(*curr) + uintptr(len(curr.key)) + uintptr(len(curr.value))
 
-		curr.Value = value
-		curr.Seq = seq
-		curr.Tombstone = false
+		curr.value = value
+		curr.seq = seq
+		curr.tombstone = false
 
-		m.sizeBytes += unsafe.Sizeof(*curr) + uintptr(len(curr.Key)) + uintptr(len(curr.Value))
+		m.sizeBytes += unsafe.Sizeof(*curr) + uintptr(len(curr.key)) + uintptr(len(curr.value))
 
 		return
 	}
@@ -99,8 +99,8 @@ func (m *memtable) Insert(key string, value []byte, seq uint64) {
 	m.height = max(m.height, level)
 
 	for i := 0; i < level; i++ {
-		node.Next[i] = prevs[i].Next[i]
-		prevs[i].Next[i] = node
+		node.next[i] = prevs[i].next[i]
+		prevs[i].next[i] = node
 	}
 
 	m.sizeBytes += unsafe.Sizeof(*node) + uintptr(len(key)) + uintptr(len(value))
@@ -115,21 +115,21 @@ func (m *memtable) Delete(key string, seq uint64) {
 
 	curr := m.head
 	for l := m.height - 1; l >= 0; l-- {
-		for curr.Next[l] != nil && curr.Next[l].Key < key {
-			curr = curr.Next[l]
+		for curr.next[l] != nil && curr.next[l].key < key {
+			curr = curr.next[l]
 		}
 		prevs[l] = curr
 	}
 
 	// Check if the key already exists at level 0
-	curr = curr.Next[0]
-	if curr != nil && curr.Key == key {
+	curr = curr.next[0]
+	if curr != nil && curr.key == key {
 		// Update in place
-		m.sizeBytes -= uintptr(len(curr.Value))
+		m.sizeBytes -= uintptr(len(curr.value))
 
-		curr.Value = []byte{}
-		curr.Seq = seq
-		curr.Tombstone = true
+		curr.value = []byte{}
+		curr.seq = seq
+		curr.tombstone = true
 
 		return
 	}
@@ -140,8 +140,8 @@ func (m *memtable) Delete(key string, seq uint64) {
 	m.height = max(m.height, level)
 
 	for i := 0; i < level; i++ {
-		tombstone.Next[i] = prevs[i].Next[i]
-		prevs[i].Next[i] = tombstone
+		tombstone.next[i] = prevs[i].next[i]
+		prevs[i].next[i] = tombstone
 	}
 
 	m.sizeBytes += unsafe.Sizeof(*tombstone) + uintptr(len(key))
