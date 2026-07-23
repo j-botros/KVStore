@@ -6,11 +6,11 @@ import (
 
 type bloomFilter struct {
 	bitstring []byte
-	numHashes uint
-	numKeys   uint
+	numHashes uint64
+	numKeys   uint64
 }
 
-func newBloomFilter(numKeys uint) *bloomFilter {
+func newBloomFilter(numKeys uint64) *bloomFilter {
 	return &bloomFilter{
 		bitstring: make([]byte, (10*numKeys+7)/8),
 		numKeys:   numKeys,
@@ -21,14 +21,14 @@ func (bf *bloomFilter) setBloomBits(key string) {
 	// Compute two independent hashes once
 	h1 := fnv.New64()
 	h1.Write([]byte(key))
-	a := uint(h1.Sum64())
+	a := uint64(h1.Sum64())
 
 	h2 := fnv.New64()
 	h2.Write([]byte(key))
-	b := uint(h2.Sum64())
+	b := uint64(h2.Sum64())
 
 	// Derive k indices from the two hashes (no seed needed)
-	for i := uint(0); i < bf.numHashes; i++ {
+	for i := uint64(0); i < bf.numHashes; i++ {
 		index := (a + i*b) % bf.numKeys
 		bf.bitstring[index/8] |= 1 << (index % 8)
 	}
@@ -38,14 +38,14 @@ func (bf *bloomFilter) keyNotPresent(key string) bool {
 	// Compute two independent hashes once
 	h1 := fnv.New64()
 	h1.Write([]byte(key))
-	a := uint(h1.Sum64())
+	a := uint64(h1.Sum64())
 
 	h2 := fnv.New64()
 	h2.Write([]byte(key))
-	b := uint(h2.Sum64())
+	b := uint64(h2.Sum64())
 
 	// Derive k indices from the two hashes (no seed needed)
-	for i := uint(0); i < bf.numHashes; i++ {
+	for i := uint64(0); i < bf.numHashes; i++ {
 		index := (a + i*b) % bf.numKeys
 
 		if bf.bitstring[index/8]&(1<<(index%8)) == 0 {

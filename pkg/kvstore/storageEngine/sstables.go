@@ -238,7 +238,7 @@ func (sst *sst) readFooter() (index *index, bf *bloomFilter, err error) {
 		return nil, nil, ErrBadFile
 	}
 
-	// TODO: Instantiate index
+	// Instantiate index
 	indexOffset := binary.LittleEndian.Uint64(buf[0:8])
 	indexLength := binary.LittleEndian.Uint64(buf[8:16])
 
@@ -277,9 +277,18 @@ func (sst *sst) readFooter() (index *index, bf *bloomFilter, err error) {
 		prevBlockKey = lastKey
 	}
 
-	// TODO: Instantiate bloom filter
+	// Instantiate bloom filter
 	bloomOffset := binary.LittleEndian.Uint64(buf[16:24])
 	bloomLength := binary.LittleEndian.Uint64(buf[24:32])
 
-	return index, nil, nil
+	bfBuf := make([]byte, bloomLength)
+	_, err = sstFile.ReadAt(bfBuf, int64(bloomOffset))
+	if err != nil {
+		return nil, nil, err
+	}
+
+	bf = newBloomFilter(bloomLength)
+	bf.bitstring = bfBuf
+
+	return index, bf, nil
 }
