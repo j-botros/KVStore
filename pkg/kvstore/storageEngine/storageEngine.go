@@ -23,9 +23,9 @@ type metadata struct {
 
 func (e *StorageEngine) Get(key string) (value []byte, err error) {
 	// Search Memtable for key-value
-	value, err = e.memtable.Get(key)
+	value, err = e.memtable.get(key)
 	if err == nil {
-		return value, err
+		return value, nil
 	} else if err != ErrKeyNotFound {
 		return nil, err
 	}
@@ -45,7 +45,7 @@ func (e *StorageEngine) Put(key string, value []byte) error {
 	e.nextSeq++
 
 	// Push to Memtable
-	e.memtable.Insert(key, value, seq)
+	e.memtable.insert(key, value, seq)
 	return nil
 }
 
@@ -59,6 +59,6 @@ func (e *StorageEngine) Delete(key string) error {
 	e.nextSeq++
 
 	// Delete from Memtable
-	e.memtable.Delete(key, seq)
+	e.memtable.delete(key, seq)
 	return nil
 }

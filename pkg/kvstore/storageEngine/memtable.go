@@ -45,7 +45,7 @@ func newMemtable(capacityBytes uintptr) *memtable {
 	}
 }
 
-func (m *memtable) Get(key string) (value []byte, err error) {
+func (m *memtable) get(key string) (value []byte, err error) {
 	curr := m.head
 	for l := m.height - 1; l >= 0; l-- {
 		for curr.next[l] != nil && curr.next[l].key < key {
@@ -63,7 +63,7 @@ func (m *memtable) Get(key string) (value []byte, err error) {
 	return nil, ErrKeyNotFound
 }
 
-func (m *memtable) Insert(key string, value []byte, seq uint64) {
+func (m *memtable) insert(key string, value []byte, seq uint64) {
 	// Track predecessors at each level
 	prevs := [MAX_LEVELS]*node{}
 	for i := range prevs {
@@ -106,7 +106,7 @@ func (m *memtable) Insert(key string, value []byte, seq uint64) {
 	m.sizeBytes += unsafe.Sizeof(*node) + uintptr(len(key)) + uintptr(len(value))
 }
 
-func (m *memtable) Delete(key string, seq uint64) {
+func (m *memtable) delete(key string, seq uint64) {
 	// Track predecessors at each level
 	prevs := [MAX_LEVELS]*node{}
 	for i := range prevs {

@@ -16,12 +16,42 @@ type sstables struct {
 }
 
 func (sstables *sstables) get(key string) (value []byte, err error) {
-	for level := uint(0); level < sstables.levels; level++ {
+	seq := uint64(0)
+	tombstone := false
+	for _, sst := range sstables.sstList[0] {
+		if key >= sst.startKey && key <= sst.endKey {
+			curValue, curTombstone, curSeq, err := sst.search(key)
+
+			if !curTombstone && err == ErrKeyNotFound {
+				continue
+			} else if err != nil {
+				return nil, err
+			}
+
+			if curSeq >= seq {
+				seq = curSeq
+				value = curValue
+				tombstone = curTombstone
+			}
+		}
+	}
+
+	if tombstone {
+		return nil, ErrKeyNotFound
+	} else if value != nil {
+		return value, nil
+	}
+
+	for level := uint(1); level < sstables.levels; level++ {
 		for _, sst := range sstables.sstList[level] {
 			if key >= sst.startKey && key <= sst.endKey {
-				value, err := sst.search(key)
+				value, tombstone, _, err = sst.search(key)
 
-				if err != nil {
+				if tombstone {
+					return nil, ErrKeyNotFound
+				} else if err == ErrKeyNotFound {
+					continue
+				} else if err != nil {
 					return nil, err
 				}
 
@@ -51,16 +81,16 @@ type sst struct {
 	crcTable *crc32.Table
 }
 
-func (sst *sst) search(key string) (value []byte, err error) {
+func (sst *sst) search(key string) (value []byte, isTombstone bool, seq uint64, err error) {
 	// Check bloom filter
 	if sst.bloomFilter.keyNotPresent(key) {
-		return nil, ErrKeyNotFound
+		return nil, false, 0, ErrKeyNotFound
 	}
 
 	// Find data block in SST from index
 	blockOffset, blockLength, err := sst.index.getDatablock(key)
 	if err != nil {
-		return nil, err
+		return nil, false, 0, err
 	}
 
 	// Read from file
@@ -68,7 +98,7 @@ func (sst *sst) search(key string) (value []byte, err error) {
 
 	sstFile, err := os.Open(filename)
 	if err != nil {
-		return nil, err
+		return nil, false, 0, err
 	}
 	defer sstFile.Close()
 
@@ -77,18 +107,16 @@ func (sst *sst) search(key string) (value []byte, err error) {
 		buf := new(bytes.Buffer)
 
 		// Read: seq (8 bytes)
-		var seq uint64
-
 		err = binary.Read(r, binary.LittleEndian, &seq)
 		if err == io.EOF {
 			break
 		} else if err != nil {
-			return nil, err
+			return nil, false, 0, err
 		}
 
 		err = binary.Write(buf, binary.LittleEndian, seq)
 		if err != nil {
-			return nil, err
+			return nil, false, 0, err
 		}
 
 		// Read: tombstone (1 byte)
@@ -96,12 +124,12 @@ func (sst *sst) search(key string) (value []byte, err error) {
 
 		err = binary.Read(r, binary.LittleEndian, &tombstone)
 		if err != nil {
-			return nil, err
+			return nil, false, 0, err
 		}
 
 		err = buf.WriteByte(tombstone)
 		if err != nil {
-			return nil, err
+			return nil, false, 0, err
 		}
 
 		// Read: key length (4 bytes)
@@ -109,19 +137,19 @@ func (sst *sst) search(key string) (value []byte, err error) {
 
 		err = binary.Read(r, binary.LittleEndian, &keyLength)
 		if err != nil {
-			return nil, err
+			return nil, false, 0, err
 		}
 
 		err = binary.Write(buf, binary.LittleEndian, keyLength)
 		if err != nil {
-			return nil, err
+			return nil, false, 0, err
 		}
 
 		// Read: key
 		keyBuf := make([]byte, keyLength)
 		_, err := io.ReadFull(r, keyBuf)
 		if err != nil {
-			return nil, err
+			return nil, false, 0, err
 		}
 		buf.Write(keyBuf)
 		ekey := string(keyBuf)
@@ -132,19 +160,19 @@ func (sst *sst) search(key string) (value []byte, err error) {
 
 			err = binary.Read(r, binary.LittleEndian, &valLength)
 			if err != nil {
-				return nil, err
+				return nil, false, 0, err
 			}
 
 			err = binary.Write(buf, binary.LittleEndian, valLength)
 			if err != nil {
-				return nil, err
+				return nil, false, 0, err
 			}
 
 			// Read: value
 			value = make([]byte, valLength)
 			_, err := io.ReadFull(r, value)
 			if err != nil {
-				return nil, err
+				return nil, false, 0, err
 			}
 			buf.Write(value)
 		}
@@ -152,22 +180,22 @@ func (sst *sst) search(key string) (value []byte, err error) {
 		// Read: checksum (4 bytes)
 		var checksum uint32
 
-		err = binary.Read(r, binary.LittleEndian, &keyLength)
+		err = binary.Read(r, binary.LittleEndian, &checksum)
 		if err != nil {
-			return nil, err
+			return nil, false, 0, err
 		}
 
 		if key == ekey {
 			expected := crc32.Checksum(buf.Bytes(), sst.crcTable)
 			if checksum != expected {
-				return nil, ErrBadData
+				return nil, false, 0, ErrBadData
 			}
 
-			return value, nil
+			return value, tombstone == 1, seq, nil
 		}
 	}
 
-	return nil, ErrKeyNotFound
+	return nil, false, 0, ErrKeyNotFound
 }
 
 type block struct {
@@ -194,9 +222,9 @@ func (index *index) getDatablock(key string) (offset uint64, length uint64, err 
 	for l <= r {
 		m := (r + l) / 2
 
-		if (*index)[m].lastKey >= key && key > (*index)[m].prevBlockKey {
+		if key <= (*index)[m].lastKey && key > (*index)[m].prevBlockKey {
 			return (*index)[m].offset, (*index)[m].length, nil
-		} else if (*index)[m].lastKey >= key {
+		} else if key > (*index)[m].lastKey {
 			l = m + 1
 		} else {
 			r = m - 1
@@ -211,7 +239,7 @@ const (
 	FOOTER_SIZE  = 8 + 8 + 8 + 8 + 8 // Index offset + Index length + Bloom offset + Bloom length + Footer magic
 )
 
-func (sst *sst) readFooter() (index *index, bf *bloomFilter, err error) {
+func (sst *sst) readFooter() (idx *index, bf *bloomFilter, err error) {
 	// Read from file
 	filename := fmt.Sprintf("data/sstables/level-%d/%d.sst", sst.level, sst.filenum)
 
@@ -242,7 +270,8 @@ func (sst *sst) readFooter() (index *index, bf *bloomFilter, err error) {
 	indexOffset := binary.LittleEndian.Uint64(buf[0:8])
 	indexLength := binary.LittleEndian.Uint64(buf[8:16])
 
-	*index = []*block{}
+	slice := make(index, 0)
+	idx = &slice
 	r := io.NewSectionReader(sstFile, int64(indexOffset), int64(indexLength))
 
 	var prevBlockKey string
@@ -271,9 +300,12 @@ func (sst *sst) readFooter() (index *index, bf *bloomFilter, err error) {
 
 		var length uint64
 		err = binary.Read(r, binary.LittleEndian, &length)
+		if err != nil {
+			return nil, nil, err
+		}
 
 		block := newBlock(lastKey, offset, length, prevBlockKey)
-		*index = append(*index, block)
+		*idx = append(*idx, block)
 		prevBlockKey = lastKey
 	}
 
@@ -290,5 +322,5 @@ func (sst *sst) readFooter() (index *index, bf *bloomFilter, err error) {
 	bf = newBloomFilter(bloomLength)
 	bf.bitstring = bfBuf
 
-	return index, bf, nil
+	return idx, bf, nil
 }
