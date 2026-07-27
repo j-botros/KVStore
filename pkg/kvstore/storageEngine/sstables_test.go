@@ -11,7 +11,11 @@ import (
 ==================================================================================== */
 
 func TestNewBlock(t *testing.T) {
-	b := newBlock("zKey", 100, 200, "aKey")
+	lastKey := "zKey"
+	offset := uint64(100)
+	length := uint64(200)
+	prevKey := "aKey"
+	b := newBlock(lastKey, offset, length, prevKey)
 
 	if b.lastKey != "zKey" {
 		t.Errorf("lastKey = %q, want %q", b.lastKey, "zKey")
@@ -48,7 +52,8 @@ func TestIndex_GetDatablock_Found(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		offset, length, err := idx.getDatablock(tt.key)
+		key := tt.key
+		offset, length, err := idx.getDatablock(key)
 		if err != nil {
 			t.Errorf("getDatablock(%q): unexpected error: %v", tt.key, err)
 			continue
@@ -67,7 +72,8 @@ func TestIndex_GetDatablock_NotFound(t *testing.T) {
 	}
 
 	// Key past the last block range.
-	_, _, err := idx.getDatablock("zzz")
+	key := "zzz"
+	_, _, err := idx.getDatablock(key)
 	if err != ErrKeyNotFound {
 		t.Errorf("getDatablock(\"zzz\"): err = %v, want ErrKeyNotFound", err)
 	}
@@ -80,7 +86,8 @@ func TestIndex_GetDatablock_FirstBlock(t *testing.T) {
 	}
 
 	// First block has prevBlockKey = ""; any key > "" and <= "dog" should hit it.
-	offset, length, err := idx.getDatablock("ant")
+	key := "ant"
+	offset, length, err := idx.getDatablock(key)
 	if err != nil {
 		t.Fatalf("getDatablock(\"ant\"): %v", err)
 	}
@@ -104,7 +111,8 @@ func TestSst_Search_Found(t *testing.T) {
 	}
 	s := writeSyntheticSST(t, 0, 1, entries, crcTab)
 
-	val, isTombstone, seq, err := s.search("banana")
+	key := "banana"
+	val, isTombstone, seq, err := s.search(key)
 	if err != nil {
 		t.Fatalf("search(\"banana\"): %v", err)
 	}
@@ -129,7 +137,8 @@ func TestSst_Search_FirstEntry(t *testing.T) {
 	}
 	s := writeSyntheticSST(t, 0, 1, entries, crcTab)
 
-	val, _, _, err := s.search("alpha")
+	key := "alpha"
+	val, _, _, err := s.search(key)
 	if err != nil {
 		t.Fatalf("search(\"alpha\"): %v", err)
 	}
@@ -149,7 +158,8 @@ func TestSst_Search_LastEntry(t *testing.T) {
 	}
 	s := writeSyntheticSST(t, 0, 1, entries, crcTab)
 
-	val, _, seq, err := s.search("gamma")
+	key := "gamma"
+	val, _, seq, err := s.search(key)
 	if err != nil {
 		t.Fatalf("search(\"gamma\"): %v", err)
 	}
@@ -170,7 +180,8 @@ func TestSst_Search_Tombstone(t *testing.T) {
 	}
 	s := writeSyntheticSST(t, 0, 1, entries, crcTab)
 
-	_, isTombstone, seq, err := s.search("alpha")
+	key := "alpha"
+	_, isTombstone, seq, err := s.search(key)
 	if err != nil {
 		t.Fatalf("search(\"alpha\"): %v", err)
 	}
@@ -194,7 +205,8 @@ func TestSst_Search_NotFound(t *testing.T) {
 
 	// "aqua" is within the index range (> "" and <= "beta")
 	// but does not exist as an entry in the data block.
-	_, _, _, err := s.search("aqua")
+	key := "aqua"
+	_, _, _, err := s.search(key)
 	if err != ErrKeyNotFound {
 		t.Errorf("search(\"aqua\"): err = %v, want ErrKeyNotFound", err)
 	}
@@ -227,7 +239,8 @@ func TestSst_Search_BadChecksum(t *testing.T) {
 	}
 	f.Close()
 
-	_, _, _, err = s.search("hello")
+	key := "hello"
+	_, _, _, err = s.search(key)
 	if err != ErrBadData {
 		t.Errorf("search after corruption: err = %v, want ErrBadData", err)
 	}
@@ -324,7 +337,8 @@ func TestSstables_Get_FromLevel0(t *testing.T) {
 		crcTable: crcTab,
 	}
 
-	val, err := ss.get("rabbit")
+	key := "rabbit"
+	val, err := ss.get(key)
 	if err != nil {
 		t.Fatalf("get(\"rabbit\"): %v", err)
 	}
@@ -348,7 +362,8 @@ func TestSstables_Get_NotFound(t *testing.T) {
 		crcTable: crcTab,
 	}
 
-	_, err := ss.get("missing")
+	key := "missing"
+	_, err := ss.get(key)
 	if err != ErrKeyNotFound {
 		t.Errorf("get(\"missing\"): err = %v, want ErrKeyNotFound", err)
 	}
@@ -376,7 +391,8 @@ func TestSstables_Get_TombstoneLevel0(t *testing.T) {
 		crcTable: crcTab,
 	}
 
-	_, err := ss.get("key")
+	key := "key"
+	_, err := ss.get(key)
 	if err != ErrKeyNotFound {
 		t.Errorf("get(\"key\"): err = %v, want ErrKeyNotFound (level-0 tombstone should mask level-1 value)", err)
 	}
@@ -403,7 +419,8 @@ func TestSstables_Get_Level0SeqPrecedence(t *testing.T) {
 		crcTable: crcTab,
 	}
 
-	val, err := ss.get("key")
+	key := "key"
+	val, err := ss.get(key)
 	if err != nil {
 		t.Fatalf("get(\"key\"): %v", err)
 	}

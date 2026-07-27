@@ -10,7 +10,10 @@ import (
 )
 
 func TestNewWal(t *testing.T) {
-	w := newWal(5, 10, 2048)
+	logNumber := uint64(5)
+	lastSeq := uint64(10)
+	capacityBytes := uint64(2048)
+	w := newWal(logNumber, lastSeq, capacityBytes)
 
 	if w.logNumber != 5 {
 		t.Errorf("logNumber = %d, want 5", w.logNumber)
@@ -30,8 +33,15 @@ func TestWriteLog_BasicWrite(t *testing.T) {
 	setupTestDir(t)
 	os.MkdirAll("data/wal", 0755)
 
-	w := newWal(1, 0, 4096)
-	err := w.writeLog("hello", []byte("world"), false, 1)
+	logNumber := uint64(1)
+	lastSeq := uint64(0)
+	capacityBytes := uint64(4096)
+	w := newWal(logNumber, lastSeq, capacityBytes)
+	key := "hello"
+	val := []byte("world")
+	tombstone := false
+	seq := uint64(1)
+	err := w.writeLog(key, val, tombstone, seq)
 	if err != nil {
 		t.Fatalf("writeLog: %v", err)
 	}
@@ -49,8 +59,16 @@ func TestWriteLog_VerifyFormat(t *testing.T) {
 	setupTestDir(t)
 	os.MkdirAll("data/wal", 0755)
 
-	w := newWal(1, 0, 4096)
-	if err := w.writeLog("key1", []byte("val1"), false, 42); err != nil {
+	logNumber := uint64(1)
+	lastSeq := uint64(0)
+	capacityBytes := uint64(4096)
+	w := newWal(logNumber, lastSeq, capacityBytes)
+	
+	key := "key1"
+	val := []byte("val1")
+	tombstone := false
+	seqArg := uint64(42)
+	if err := w.writeLog(key, val, tombstone, seqArg); err != nil {
 		t.Fatalf("writeLog: %v", err)
 	}
 
@@ -114,8 +132,16 @@ func TestWriteLog_Tombstone(t *testing.T) {
 	setupTestDir(t)
 	os.MkdirAll("data/wal", 0755)
 
-	w := newWal(1, 0, 4096)
-	if err := w.writeLog("delkey", []byte{}, true, 7); err != nil {
+	logNumber := uint64(1)
+	lastSeq := uint64(0)
+	capacityBytes := uint64(4096)
+	w := newWal(logNumber, lastSeq, capacityBytes)
+	
+	key := "delkey"
+	val := []byte{}
+	tombstone := true
+	seqArg := uint64(7)
+	if err := w.writeLog(key, val, tombstone, seqArg); err != nil {
 		t.Fatalf("writeLog: %v", err)
 	}
 
@@ -143,7 +169,10 @@ func TestWriteLog_MultipleEntries(t *testing.T) {
 	setupTestDir(t)
 	os.MkdirAll("data/wal", 0755)
 
-	w := newWal(1, 0, 4096)
+	logNumber := uint64(1)
+	lastSeq := uint64(0)
+	capacityBytes := uint64(4096)
+	w := newWal(logNumber, lastSeq, capacityBytes)
 
 	entries := []struct {
 		key   string
@@ -157,7 +186,11 @@ func TestWriteLog_MultipleEntries(t *testing.T) {
 	}
 
 	for _, e := range entries {
-		if err := w.writeLog(e.key, e.value, e.tomb, e.seq); err != nil {
+		key := e.key
+		val := e.value
+		tomb := e.tomb
+		seq := e.seq
+		if err := w.writeLog(key, val, tomb, seq); err != nil {
 			t.Fatalf("writeLog(%q): %v", e.key, err)
 		}
 	}
@@ -211,16 +244,27 @@ func TestWriteLog_UpdatesLastSeq(t *testing.T) {
 	setupTestDir(t)
 	os.MkdirAll("data/wal", 0755)
 
-	w := newWal(1, 0, 4096)
+	logNumber := uint64(1)
+	lastSeq := uint64(0)
+	capacityBytes := uint64(4096)
+	w := newWal(logNumber, lastSeq, capacityBytes)
 
-	if err := w.writeLog("k", []byte("v"), false, 10); err != nil {
+	key1 := "k"
+	val1 := []byte("v")
+	tombstone1 := false
+	seq1 := uint64(10)
+	if err := w.writeLog(key1, val1, tombstone1, seq1); err != nil {
 		t.Fatalf("writeLog: %v", err)
 	}
 	if w.lastSeq != 10 {
 		t.Errorf("lastSeq = %d, want 10 after first write", w.lastSeq)
 	}
 
-	if err := w.writeLog("k2", []byte("v2"), false, 20); err != nil {
+	key2 := "k2"
+	val2 := []byte("v2")
+	tombstone2 := false
+	seq2 := uint64(20)
+	if err := w.writeLog(key2, val2, tombstone2, seq2); err != nil {
 		t.Fatalf("writeLog: %v", err)
 	}
 	if w.lastSeq != 20 {

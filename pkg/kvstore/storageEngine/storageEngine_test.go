@@ -35,11 +35,14 @@ func newTestEngine(t *testing.T) *StorageEngine {
 func TestStorageEngine_PutAndGet(t *testing.T) {
 	e := newTestEngine(t)
 
-	if err := e.Put("name", []byte("alice")); err != nil {
+	key := "name"
+	valPut := []byte("alice")
+	if err := e.Put(key, valPut); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
 
-	val, err := e.Get("name")
+	keyGet := "name"
+	val, err := e.Get(keyGet)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -51,7 +54,8 @@ func TestStorageEngine_PutAndGet(t *testing.T) {
 func TestStorageEngine_Get_NotFound(t *testing.T) {
 	e := newTestEngine(t)
 
-	_, err := e.Get("nope")
+	key := "nope"
+	_, err := e.Get(key)
 	if err != ErrKeyNotFound {
 		t.Errorf("Get(\"nope\"): err = %v, want ErrKeyNotFound", err)
 	}
@@ -60,14 +64,18 @@ func TestStorageEngine_Get_NotFound(t *testing.T) {
 func TestStorageEngine_Delete(t *testing.T) {
 	e := newTestEngine(t)
 
-	if err := e.Put("key", []byte("val")); err != nil {
+	key1 := "key"
+	val1 := []byte("val")
+	if err := e.Put(key1, val1); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
-	if err := e.Delete("key"); err != nil {
+	keyDel := "key"
+	if err := e.Delete(keyDel); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
 
-	_, err := e.Get("key")
+	keyGet := "key"
+	_, err := e.Get(keyGet)
 	if err != ErrKeyNotFound {
 		t.Errorf("Get after Delete: err = %v, want ErrKeyNotFound", err)
 	}
@@ -76,10 +84,16 @@ func TestStorageEngine_Delete(t *testing.T) {
 func TestStorageEngine_PutOverwrite(t *testing.T) {
 	e := newTestEngine(t)
 
-	e.Put("key", []byte("first"))
-	e.Put("key", []byte("second"))
+	key1 := "key"
+	val1 := []byte("first")
+	e.Put(key1, val1)
+	
+	key2 := "key"
+	val2 := []byte("second")
+	e.Put(key2, val2)
 
-	val, err := e.Get("key")
+	keyGet := "key"
+	val, err := e.Get(keyGet)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -91,11 +105,19 @@ func TestStorageEngine_PutOverwrite(t *testing.T) {
 func TestStorageEngine_DeleteThenPut(t *testing.T) {
 	e := newTestEngine(t)
 
-	e.Put("key", []byte("original"))
-	e.Delete("key")
-	e.Put("key", []byte("reborn"))
+	key1 := "key"
+	val1 := []byte("original")
+	e.Put(key1, val1)
+	
+	keyDel := "key"
+	e.Delete(keyDel)
+	
+	key2 := "key"
+	val2 := []byte("reborn")
+	e.Put(key2, val2)
 
-	val, err := e.Get("key")
+	keyGet := "key"
+	val, err := e.Get(keyGet)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -109,17 +131,22 @@ func TestStorageEngine_SequenceIncrement(t *testing.T) {
 
 	initial := e.nextSeq
 
-	e.Put("a", []byte("1"))
+	key1 := "a"
+	val1 := []byte("1")
+	e.Put(key1, val1)
 	if e.nextSeq != initial+1 {
 		t.Errorf("after Put: nextSeq = %d, want %d", e.nextSeq, initial+1)
 	}
 
-	e.Delete("a")
+	keyDel := "a"
+	e.Delete(keyDel)
 	if e.nextSeq != initial+2 {
 		t.Errorf("after Delete: nextSeq = %d, want %d", e.nextSeq, initial+2)
 	}
 
-	e.Put("b", []byte("2"))
+	key2 := "b"
+	val2 := []byte("2")
+	e.Put(key2, val2)
 	if e.nextSeq != initial+3 {
 		t.Errorf("after second Put: nextSeq = %d, want %d", e.nextSeq, initial+3)
 	}

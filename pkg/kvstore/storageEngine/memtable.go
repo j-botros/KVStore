@@ -31,17 +31,17 @@ func newNode(key string, value []byte, level int, seq uint64, tombstone bool) *n
 type memtable struct {
 	head          *node
 	height        int
-	capacityBytes uintptr
-	sizeBytes     uintptr
+	capacityBytes uint64
+	sizeBytes     uint64
 }
 
-func newMemtable(capacityBytes uintptr) *memtable {
+func newMemtable(capacityBytes uint64) *memtable {
 	node := newNode("", nil, MAX_LEVELS, 0, false)
 	return &memtable{
 		head:          node,
 		height:        1,
 		capacityBytes: capacityBytes,
-		sizeBytes:     unsafe.Sizeof(*node),
+		sizeBytes:     uint64(unsafe.Sizeof(*node)),
 	}
 }
 
@@ -82,13 +82,13 @@ func (m *memtable) insert(key string, value []byte, seq uint64) {
 	curr = curr.next[0]
 	if curr != nil && curr.key == key {
 		// Update in place
-		m.sizeBytes -= unsafe.Sizeof(*curr) + uintptr(len(curr.key)) + uintptr(len(curr.value))
+		m.sizeBytes -= uint64(unsafe.Sizeof(*curr) + uintptr(len(curr.key)) + uintptr(len(curr.value)))
 
 		curr.value = value
 		curr.seq = seq
 		curr.tombstone = false
 
-		m.sizeBytes += unsafe.Sizeof(*curr) + uintptr(len(curr.key)) + uintptr(len(curr.value))
+		m.sizeBytes += uint64(unsafe.Sizeof(*curr) + uintptr(len(curr.key)) + uintptr(len(curr.value)))
 
 		return
 	}
@@ -103,7 +103,7 @@ func (m *memtable) insert(key string, value []byte, seq uint64) {
 		prevs[i].next[i] = node
 	}
 
-	m.sizeBytes += unsafe.Sizeof(*node) + uintptr(len(key)) + uintptr(len(value))
+	m.sizeBytes += uint64(unsafe.Sizeof(*node) + uintptr(len(key)) + uintptr(len(value)))
 }
 
 func (m *memtable) delete(key string, seq uint64) {
@@ -125,7 +125,7 @@ func (m *memtable) delete(key string, seq uint64) {
 	curr = curr.next[0]
 	if curr != nil && curr.key == key {
 		// Update in place
-		m.sizeBytes -= uintptr(len(curr.value))
+		m.sizeBytes -= uint64(len(curr.value))
 
 		curr.value = []byte{}
 		curr.seq = seq
@@ -144,7 +144,7 @@ func (m *memtable) delete(key string, seq uint64) {
 		prevs[i].next[i] = tombstone
 	}
 
-	m.sizeBytes += unsafe.Sizeof(*tombstone) + uintptr(len(key))
+	m.sizeBytes += uint64(unsafe.Sizeof(*tombstone) + uintptr(len(key)))
 }
 
 func (m *memtable) randomLevel() int {
