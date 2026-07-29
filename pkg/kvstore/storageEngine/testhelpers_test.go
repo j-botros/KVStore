@@ -60,10 +60,8 @@ func writeSyntheticSST(t *testing.T, level uint, filenum uint64, entries []testE
 		}
 		binary.Write(entryBuf, binary.LittleEndian, uint32(len(e.key)))
 		entryBuf.Write([]byte(e.key))
-		if !e.tombstone {
-			binary.Write(entryBuf, binary.LittleEndian, uint32(len(e.value)))
-			entryBuf.Write(e.value)
-		}
+		binary.Write(entryBuf, binary.LittleEndian, uint32(len(e.value)))
+		entryBuf.Write(e.value)
 		checksum := crc32.Checksum(entryBuf.Bytes(), crcTab)
 		dataBuf.Write(entryBuf.Bytes())
 		binary.Write(dataBuf, binary.LittleEndian, checksum)
@@ -131,4 +129,19 @@ func writeSyntheticSST(t *testing.T, level uint, filenum uint64, entries []testE
 		bloomFilter: bf,
 		crcTable:    crcTab,
 	}
+}
+
+// newTestMemtable builds a *memtable from the provided entries.
+// Entries MUST be provided in ascending key order.
+func newTestMemtable(t *testing.T, entries []testEntry) *memtable {
+	t.Helper()
+	m := newMemtable(64 * 1024 * 1024) // 64 MB capacity
+	for _, e := range entries {
+		if e.tombstone {
+			m.delete(e.key, e.seq)
+		} else {
+			m.insert(e.key, e.value, e.seq)
+		}
+	}
+	return m
 }

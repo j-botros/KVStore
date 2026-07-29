@@ -103,9 +103,11 @@ type sst struct {
 const (
 	// Used to validate SSTable
 	FOOTER_MAGIC = uint64(0x4c55564c49414e41)
-
 	// Index offset + Index length + Bloom offset + Bloom length + Footer magic
 	FOOTER_SIZE = 8 + 8 + 8 + 8 + 8
+
+	// Data block size (KB)
+	TARGET_BLOCK_SIZE = 4 * 1024 // 4 KB
 )
 
 func newSst(filenum uint64, memtable *memtable, crcTable *crc32.Table) (*sst, error) {
@@ -119,8 +121,6 @@ func newSst(filenum uint64, memtable *memtable, crcTable *crc32.Table) (*sst, er
 	bf := newBloomFilter(memtable.numKeys)
 	sst.bloomFilter = bf
 
-	// TODO: Create index
-
 	// Create file
 	filename := fmt.Sprintf("data/sstables/level-%d/%d.sst", sst.level, sst.filenum)
 
@@ -129,16 +129,113 @@ func newSst(filenum uint64, memtable *memtable, crcTable *crc32.Table) (*sst, er
 		return nil, err
 	}
 
-	sstFile, err := os.Create(filename)
+	sstFile, err := os.OpenFile(
+		filename,
+		os.O_APPEND|os.O_CREATE|os.O_WRONLY,
+		0644,
+	)
 	if err != nil {
 		return nil, err
 	}
 	defer sstFile.Close()
 
+	lastSeq := uint64(0)
 	curr := memtable.head.next[0]
-	for curr != nil {
-		// TODO: Write each entry to disk
+	startKey := curr.key
+	var endKey string
+
+	// fileBuffer accumulates all blocks before the single final Write+Sync
+	fileBuffer := new(bytes.Buffer)
+
+	// currentBlockBuf accumulates entries for the current in-progress block
+	currentBlockBuf := new(bytes.Buffer)
+	currentBlockOffset := uint64(0)
+
+	// prevBlockKey tracks the lastKey of the previous block for index binary search
+	prevBlockKey := ""
+
+	idx := make(index, 0)
+
+	flushBlock := func() {
+		fileBuffer.Write(currentBlockBuf.Bytes())
+
+		idx = append(idx, newBlock(
+			endKey,
+			currentBlockOffset,
+			uint64(currentBlockBuf.Len()),
+			prevBlockKey,
+		))
+
+		prevBlockKey = endKey
+		currentBlockOffset += uint64(currentBlockBuf.Len())
+		currentBlockBuf = new(bytes.Buffer)
 	}
+
+	for curr != nil {
+		// Add key to bloom filter
+		sst.bloomFilter.setBloomBits(curr.key)
+
+		// Format: seq(8) tombstone(1) keyLength(4) key valueLength(4) value checksum(4)
+		entryBuf := new(bytes.Buffer)
+
+		// Write: seq (8 bytes)
+		binary.Write(entryBuf, binary.LittleEndian, curr.seq)
+
+		// Write: tombstone (1 byte)
+		if curr.tombstone {
+			entryBuf.WriteByte(1)
+		} else {
+			entryBuf.WriteByte(0)
+		}
+
+		// Write: key length (4 bytes) + key
+		keyBytes := []byte(curr.key)
+		binary.Write(entryBuf, binary.LittleEndian, uint32(len(keyBytes)))
+		entryBuf.Write(keyBytes)
+
+		// Write: value length (4 bytes) + value
+		binary.Write(entryBuf, binary.LittleEndian, uint32(len(curr.value)))
+		entryBuf.Write(curr.value)
+
+		// Write: checksum (4 bytes) over the entry bytes written so far
+		checksum := crc32.Checksum(entryBuf.Bytes(), crcTable)
+		binary.Write(entryBuf, binary.LittleEndian, checksum)
+
+		currentBlockBuf.Write(entryBuf.Bytes())
+
+		lastSeq = curr.seq
+		endKey = curr.key
+		curr = curr.next[0]
+
+		// Flush full block to fileBuffer and record its index entry
+		if currentBlockBuf.Len() >= TARGET_BLOCK_SIZE {
+			flushBlock()
+		}
+	}
+
+	// Flush the final partial block (if any entries remain)
+	if currentBlockBuf.Len() > 0 {
+		flushBlock()
+	}
+
+	sst.index = &idx
+
+	// Write entire SSTable to disk in one call, then sync once
+	if _, err := sstFile.Write(fileBuffer.Bytes()); err != nil {
+		sstFile.Close()
+		os.Remove(filename)
+		return nil, err
+	}
+
+	if err := sstFile.Sync(); err != nil {
+		sstFile.Close()
+		os.Remove(filename)
+		return nil, err
+	}
+
+	sst.lastSeq = lastSeq
+	sst.startKey = startKey
+	sst.endKey = endKey
 
 	return sst, nil
 }
@@ -216,28 +313,26 @@ func (sst *sst) search(key string) (value []byte, isTombstone bool, seq uint64, 
 		buf.Write(keyBuf)
 		ekey := string(keyBuf)
 
-		if tombstone == 0 {
-			// Read: value length (4 bytes)
-			var valLength uint32
+		// Read: value length (4 bytes)
+		var valLength uint32
 
-			err = binary.Read(r, binary.LittleEndian, &valLength)
-			if err != nil {
-				return nil, false, 0, err
-			}
-
-			err = binary.Write(buf, binary.LittleEndian, valLength)
-			if err != nil {
-				return nil, false, 0, err
-			}
-
-			// Read: value
-			value = make([]byte, valLength)
-			_, err := io.ReadFull(r, value)
-			if err != nil {
-				return nil, false, 0, err
-			}
-			buf.Write(value)
+		err = binary.Read(r, binary.LittleEndian, &valLength)
+		if err != nil {
+			return nil, false, 0, err
 		}
+
+		err = binary.Write(buf, binary.LittleEndian, valLength)
+		if err != nil {
+			return nil, false, 0, err
+		}
+
+		// Read: value
+		value = make([]byte, valLength)
+		_, err = io.ReadFull(r, value)
+		if err != nil {
+			return nil, false, 0, err
+		}
+		buf.Write(value)
 
 		// Read: checksum (4 bytes)
 		var checksum uint32

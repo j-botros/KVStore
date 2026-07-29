@@ -3,12 +3,236 @@ package storageengine
 import (
 	"hash/crc32"
 	"os"
+	"strings"
 	"testing"
 )
 
 /* ====================================================================================
-	BLOCK / INDEX TESTS
+	NEW SST TESTS
 ==================================================================================== */
+
+// TestNewSst_Metadata checks that the returned *sst has the correct scalar fields.
+func TestNewSst_Metadata(t *testing.T) {
+	setupTestDir(t)
+	crcTab := crc32.MakeTable(crc32.Castagnoli)
+
+	entries := []testEntry{
+		{key: "apple", value: []byte("red"), seq: 1},
+		{key: "banana", value: []byte("yellow"), seq: 3},
+		{key: "cherry", value: []byte("dark-red"), seq: 2},
+	}
+	m := newTestMemtable(t, entries)
+
+	s, err := newSst(1, m, crcTab)
+	if err != nil {
+		t.Fatalf("newSst: %v", err)
+	}
+
+	if s.filenum != 1 {
+		t.Errorf("filenum = %d, want 1", s.filenum)
+	}
+	if s.level != 0 {
+		t.Errorf("level = %d, want 0", s.level)
+	}
+	if s.startKey != "apple" {
+		t.Errorf("startKey = %q, want %q", s.startKey, "apple")
+	}
+	if s.endKey != "cherry" {
+		t.Errorf("endKey = %q, want %q", s.endKey, "cherry")
+	}
+	if s.lastSeq != 2 {
+		t.Errorf("lastSeq = %d, want 2 (seq of last key cherry)", s.lastSeq)
+	}
+}
+
+// TestNewSst_IndexBuilt checks that the index is populated.
+func TestNewSst_IndexBuilt(t *testing.T) {
+	setupTestDir(t)
+	crcTab := crc32.MakeTable(crc32.Castagnoli)
+
+	entries := []testEntry{
+		{key: "alpha", value: []byte("a"), seq: 1},
+		{key: "beta", value: []byte("b"), seq: 2},
+		{key: "gamma", value: []byte("c"), seq: 3},
+	}
+	m := newTestMemtable(t, entries)
+
+	s, err := newSst(1, m, crcTab)
+	if err != nil {
+		t.Fatalf("newSst: %v", err)
+	}
+
+	if s.index == nil {
+		t.Fatal("index is nil")
+	}
+	if len(*s.index) == 0 {
+		t.Fatal("index has no blocks")
+	}
+
+	// Last block must have the last key as its lastKey.
+	last := (*s.index)[len(*s.index)-1]
+	if last.lastKey != "gamma" {
+		t.Errorf("last block lastKey = %q, want %q", last.lastKey, "gamma")
+	}
+}
+
+// TestNewSst_BloomFilter checks that the bloom filter is populated for inserted keys.
+func TestNewSst_BloomFilter(t *testing.T) {
+	setupTestDir(t)
+	crcTab := crc32.MakeTable(crc32.Castagnoli)
+
+	entries := []testEntry{
+		{key: "dog", value: []byte("woof"), seq: 1},
+		{key: "cat", value: []byte("meow"), seq: 2},
+	}
+	m := newTestMemtable(t, entries)
+
+	s, err := newSst(1, m, crcTab)
+	if err != nil {
+		t.Fatalf("newSst: %v", err)
+	}
+
+	if s.bloomFilter == nil {
+		t.Fatal("bloomFilter is nil")
+	}
+	// Keys that were inserted must not be reported as absent.
+	if s.bloomFilter.keyNotPresent("dog") {
+		t.Error("bloom filter reports \"dog\" not present, want present")
+	}
+	if s.bloomFilter.keyNotPresent("cat") {
+		t.Error("bloom filter reports \"cat\" not present, want present")
+	}
+}
+
+// TestNewSst_FileCreated checks that the SST file actually exists on disk after newSst.
+func TestNewSst_FileCreated(t *testing.T) {
+	setupTestDir(t)
+	crcTab := crc32.MakeTable(crc32.Castagnoli)
+
+	entries := []testEntry{
+		{key: "key", value: []byte("val"), seq: 1},
+	}
+	m := newTestMemtable(t, entries)
+
+	if _, err := newSst(7, m, crcTab); err != nil {
+		t.Fatalf("newSst: %v", err)
+	}
+
+	if _, err := os.Stat("data/sstables/level-0/7.sst"); os.IsNotExist(err) {
+		t.Error("expected SST file to exist on disk, but it does not")
+	}
+}
+
+// TestNewSst_RoundTrip writes an SST via newSst then reads back every key via search.
+func TestNewSst_RoundTrip(t *testing.T) {
+	setupTestDir(t)
+	crcTab := crc32.MakeTable(crc32.Castagnoli)
+
+	entries := []testEntry{
+		{key: "apple", value: []byte("red"), seq: 1},
+		{key: "banana", value: []byte("yellow"), seq: 2},
+		{key: "cherry", value: []byte("dark-red"), seq: 3},
+	}
+	m := newTestMemtable(t, entries)
+
+	s, err := newSst(1, m, crcTab)
+	if err != nil {
+		t.Fatalf("newSst: %v", err)
+	}
+
+	for _, e := range entries {
+		val, isTombstone, seq, err := s.search(e.key)
+		if err != nil {
+			t.Errorf("search(%q): %v", e.key, err)
+			continue
+		}
+		if isTombstone {
+			t.Errorf("search(%q): isTombstone = true, want false", e.key)
+		}
+		if string(val) != string(e.value) {
+			t.Errorf("search(%q): value = %q, want %q", e.key, val, e.value)
+		}
+		if seq != e.seq {
+			t.Errorf("search(%q): seq = %d, want %d", e.key, seq, e.seq)
+		}
+	}
+}
+
+// TestNewSst_RoundTrip_Tombstone verifies that a tombstone entry round-trips correctly.
+func TestNewSst_RoundTrip_Tombstone(t *testing.T) {
+	setupTestDir(t)
+	crcTab := crc32.MakeTable(crc32.Castagnoli)
+
+	entries := []testEntry{
+		{key: "dead", value: []byte{}, seq: 5, tombstone: true},
+	}
+	m := newTestMemtable(t, entries)
+
+	s, err := newSst(1, m, crcTab)
+	if err != nil {
+		t.Fatalf("newSst: %v", err)
+	}
+
+	_, isTombstone, seq, err := s.search("dead")
+	if err != nil {
+		t.Fatalf("search(\"dead\"): %v", err)
+	}
+	if !isTombstone {
+		t.Error("isTombstone = false, want true")
+	}
+	if seq != 5 {
+		t.Errorf("seq = %d, want 5", seq)
+	}
+}
+
+// TestNewSst_MultiBlock verifies that entries exceeding TARGET_BLOCK_SIZE produce
+// more than one index block, and that search still finds every key correctly.
+func TestNewSst_MultiBlock(t *testing.T) {
+	setupTestDir(t)
+	crcTab := crc32.MakeTable(crc32.Castagnoli)
+
+	// Build enough entries to exceed at least one 4 KB block.
+	// Each entry is ~100 bytes; 50 entries ≈ 5 KB → at least 2 blocks.
+	var entries []testEntry
+	for i := 0; i < 50; i++ {
+		key := string(rune('a'+i%26)) + strings.Repeat("x", 10)
+		// Keys must be unique and sorted; use a fixed-width format.
+		key = string([]byte{byte('a' + i/26), byte('a' + i%26)}) + strings.Repeat("x", 8)
+		entries = append(entries, testEntry{
+			key:   key,
+			value: []byte(strings.Repeat("v", 80)),
+			seq:   uint64(i + 1),
+		})
+	}
+	m := newTestMemtable(t, entries)
+
+	s, err := newSst(1, m, crcTab)
+	if err != nil {
+		t.Fatalf("newSst: %v", err)
+	}
+
+	if s.index == nil || len(*s.index) < 2 {
+		t.Errorf("expected at least 2 index blocks for large memtable, got %d", len(*s.index))
+	}
+
+	// Spot-check: first and last entries must be readable.
+	first := entries[0]
+	val, _, _, err := s.search(first.key)
+	if err != nil {
+		t.Errorf("search(%q): %v", first.key, err)
+	} else if string(val) != string(first.value) {
+		t.Errorf("search(%q) = %q, want %q", first.key, val, first.value)
+	}
+
+	last := entries[len(entries)-1]
+	val, _, _, err = s.search(last.key)
+	if err != nil {
+		t.Errorf("search(%q): %v", last.key, err)
+	} else if string(val) != string(last.value) {
+		t.Errorf("search(%q) = %q, want %q", last.key, val, last.value)
+	}
+}
+
 
 func TestNewBlock(t *testing.T) {
 	lastKey := "zKey"
