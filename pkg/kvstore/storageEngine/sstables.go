@@ -7,7 +7,12 @@ import (
 	"hash/crc32"
 	"io"
 	"os"
+	"path/filepath"
 )
+
+/* ====================================================================================
+	SSTABLES CLASS
+==================================================================================== */
 
 type sstables struct {
 	levels   uint
@@ -63,6 +68,20 @@ func (sstables *sstables) get(key string) (value []byte, err error) {
 	return nil, ErrKeyNotFound
 }
 
+func (sstables *sstables) flush(filenum uint64, memtable *memtable, crcTable *crc32.Table) error {
+	newSst, err := newSst(filenum, memtable, crcTable)
+	if err != nil {
+		return err
+	}
+
+	sstables.sstList[0] = append(sstables.sstList[0], newSst)
+	return nil
+}
+
+/* ====================================================================================
+	SST CLASS & INDEX/BLOCK CLASSES
+==================================================================================== */
+
 type sst struct {
 	// SST file data
 	filenum  uint64
@@ -72,13 +91,56 @@ type sst struct {
 	endKey   string
 
 	// Index
-	index index
+	index *index
 
 	// Bloom filter
-	bloomFilter bloomFilter
+	bloomFilter *bloomFilter
 
 	// Checksum table
 	crcTable *crc32.Table
+}
+
+const (
+	// Used to validate SSTable
+	FOOTER_MAGIC = uint64(0x4c55564c49414e41)
+
+	// Index offset + Index length + Bloom offset + Bloom length + Footer magic
+	FOOTER_SIZE = 8 + 8 + 8 + 8 + 8
+)
+
+func newSst(filenum uint64, memtable *memtable, crcTable *crc32.Table) (*sst, error) {
+	sst := &sst{
+		filenum:  filenum,
+		level:    0,
+		crcTable: crcTable,
+	}
+
+	// Create bloom filter
+	bf := newBloomFilter(memtable.numKeys)
+	sst.bloomFilter = bf
+
+	// TODO: Create index
+
+	// Create file
+	filename := fmt.Sprintf("data/sstables/level-%d/%d.sst", sst.level, sst.filenum)
+
+	dir := filepath.Dir(filename)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return nil, err
+	}
+
+	sstFile, err := os.Create(filename)
+	if err != nil {
+		return nil, err
+	}
+	defer sstFile.Close()
+
+	curr := memtable.head.next[0]
+	for curr != nil {
+		// TODO: Write each entry to disk
+	}
+
+	return sst, nil
 }
 
 func (sst *sst) search(key string) (value []byte, isTombstone bool, seq uint64, err error) {
@@ -233,11 +295,6 @@ func (index *index) getDatablock(key string) (offset uint64, length uint64, err 
 
 	return 0, 0, ErrKeyNotFound
 }
-
-const (
-	FOOTER_MAGIC = uint64(0x4c55564c49414e41)
-	FOOTER_SIZE  = 8 + 8 + 8 + 8 + 8 // Index offset + Index length + Bloom offset + Bloom length + Footer magic
-)
 
 func (sst *sst) readFooter() (idx *index, bf *bloomFilter, err error) {
 	// Read from file

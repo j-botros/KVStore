@@ -5,12 +5,12 @@ import (
 )
 
 type StorageEngine struct {
-	memtable memtable
-	metadata metadata
+	memtable *memtable
+	disk     *disk
 	nextSeq  uint64
 }
 
-type metadata struct {
+type disk struct {
 	nextFileNumber uint64
 	wal            *wal
 	sstables       *sstables
@@ -31,14 +31,14 @@ func (e *StorageEngine) Get(key string) (value []byte, err error) {
 	}
 
 	// Search SSTables for key-value
-	value, err = e.metadata.sstables.get(key)
+	value, err = e.disk.sstables.get(key)
 	return value, err
 }
 
 func (e *StorageEngine) Put(key string, value []byte) error {
 	seq := e.nextSeq
 	// Update WAL
-	err := e.metadata.wal.writeLog(key, value, false, seq)
+	err := e.disk.wal.writeLog(key, value, false, seq)
 	if err != nil {
 		return err
 	}
@@ -52,7 +52,7 @@ func (e *StorageEngine) Put(key string, value []byte) error {
 func (e *StorageEngine) Delete(key string) error {
 	seq := e.nextSeq
 	// Update WAL
-	err := e.metadata.wal.writeLog(key, []byte{}, true, seq)
+	err := e.disk.wal.writeLog(key, []byte{}, true, seq)
 	if err != nil {
 		return err
 	}
@@ -60,5 +60,19 @@ func (e *StorageEngine) Delete(key string) error {
 
 	// Delete from Memtable
 	e.memtable.delete(key, seq)
+	return nil
+}
+
+/* ====================================================================================
+	BACKGROUND METHODS
+==================================================================================== */
+
+func (e *StorageEngine) FlushCache() error {
+	err := e.disk.sstables.flush(e.disk.nextFileNumber, e.memtable, e.disk.crcTable)
+	if err != nil {
+		return err
+	}
+
+	e.disk.nextFileNumber++
 	return nil
 }

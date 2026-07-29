@@ -117,7 +117,7 @@ func writeSyntheticSST(t *testing.T, level uint, filenum uint64, entries []testE
 	}
 
 	// ── Return in-memory sst struct ─────────────────────────────
-	idx := index{
+	idx := &index{
 		newBlock(lastKey, dataBlockOffset, dataBlockLength, ""),
 	}
 
@@ -128,7 +128,7 @@ func writeSyntheticSST(t *testing.T, level uint, filenum uint64, entries []testE
 		startKey:    entries[0].key,
 		endKey:      entries[len(entries)-1].key,
 		index:       idx,
-		bloomFilter: *bf,
+		bloomFilter: bf,
 		crcTable:    crcTab,
 	}
 }

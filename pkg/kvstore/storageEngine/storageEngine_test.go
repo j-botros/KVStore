@@ -15,18 +15,19 @@ func newTestEngine(t *testing.T) *StorageEngine {
 		t.Fatal(err)
 	}
 
-	crcTab := crc32.MakeTable(crc32.Castagnoli)
+	crcTable := crc32.MakeTable(crc32.Castagnoli)
+
 	return &StorageEngine{
-		memtable: *newMemtable(4096),
-		metadata: metadata{
+		memtable: newMemtable(4096),
+		disk: &disk{
 			nextFileNumber: 1,
-			wal:            newWal(1, 0, 4096),
+			wal:            newWal(1, 0, 4096, crcTable),
 			sstables: &sstables{
 				levels:   1,
 				sstList:  make([][]*sst, 1),
-				crcTable: crcTab,
+				crcTable: crcTable,
 			},
-			crcTable: crcTab,
+			crcTable: crcTable,
 		},
 		nextSeq: 1,
 	}
@@ -87,7 +88,7 @@ func TestStorageEngine_PutOverwrite(t *testing.T) {
 	key1 := "key"
 	val1 := []byte("first")
 	e.Put(key1, val1)
-	
+
 	key2 := "key"
 	val2 := []byte("second")
 	e.Put(key2, val2)
@@ -108,10 +109,10 @@ func TestStorageEngine_DeleteThenPut(t *testing.T) {
 	key1 := "key"
 	val1 := []byte("original")
 	e.Put(key1, val1)
-	
+
 	keyDel := "key"
 	e.Delete(keyDel)
-	
+
 	key2 := "key"
 	val2 := []byte("reborn")
 	e.Put(key2, val2)

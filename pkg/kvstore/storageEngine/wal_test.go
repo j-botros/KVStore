@@ -13,7 +13,9 @@ func TestNewWal(t *testing.T) {
 	logNumber := uint64(5)
 	lastSeq := uint64(10)
 	capacityBytes := uint64(2048)
-	w := newWal(logNumber, lastSeq, capacityBytes)
+	crcTable := crc32.MakeTable(crc32.Castagnoli)
+
+	w := newWal(logNumber, lastSeq, capacityBytes, crcTable)
 
 	if w.logNumber != 5 {
 		t.Errorf("logNumber = %d, want 5", w.logNumber)
@@ -36,7 +38,8 @@ func TestWriteLog_BasicWrite(t *testing.T) {
 	logNumber := uint64(1)
 	lastSeq := uint64(0)
 	capacityBytes := uint64(4096)
-	w := newWal(logNumber, lastSeq, capacityBytes)
+	crcTable := crc32.MakeTable(crc32.Castagnoli)
+	w := newWal(logNumber, lastSeq, capacityBytes, crcTable)
 	key := "hello"
 	val := []byte("world")
 	tombstone := false
@@ -62,8 +65,9 @@ func TestWriteLog_VerifyFormat(t *testing.T) {
 	logNumber := uint64(1)
 	lastSeq := uint64(0)
 	capacityBytes := uint64(4096)
-	w := newWal(logNumber, lastSeq, capacityBytes)
-	
+	crcTable := crc32.MakeTable(crc32.Castagnoli)
+	w := newWal(logNumber, lastSeq, capacityBytes, crcTable)
+
 	key := "key1"
 	val := []byte("val1")
 	tombstone := false
@@ -135,8 +139,9 @@ func TestWriteLog_Tombstone(t *testing.T) {
 	logNumber := uint64(1)
 	lastSeq := uint64(0)
 	capacityBytes := uint64(4096)
-	w := newWal(logNumber, lastSeq, capacityBytes)
-	
+	crcTable := crc32.MakeTable(crc32.Castagnoli)
+	w := newWal(logNumber, lastSeq, capacityBytes, crcTable)
+
 	key := "delkey"
 	val := []byte{}
 	tombstone := true
@@ -172,7 +177,8 @@ func TestWriteLog_MultipleEntries(t *testing.T) {
 	logNumber := uint64(1)
 	lastSeq := uint64(0)
 	capacityBytes := uint64(4096)
-	w := newWal(logNumber, lastSeq, capacityBytes)
+	crcTable := crc32.MakeTable(crc32.Castagnoli)
+	w := newWal(logNumber, lastSeq, capacityBytes, crcTable)
 
 	entries := []struct {
 		key   string
@@ -247,7 +253,8 @@ func TestWriteLog_UpdatesLastSeq(t *testing.T) {
 	logNumber := uint64(1)
 	lastSeq := uint64(0)
 	capacityBytes := uint64(4096)
-	w := newWal(logNumber, lastSeq, capacityBytes)
+	crcTable := crc32.MakeTable(crc32.Castagnoli)
+	w := newWal(logNumber, lastSeq, capacityBytes, crcTable)
 
 	key1 := "k"
 	val1 := []byte("v")

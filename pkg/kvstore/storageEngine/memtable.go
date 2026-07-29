@@ -33,6 +33,7 @@ type memtable struct {
 	height        int
 	capacityBytes uint64
 	sizeBytes     uint64
+	numKeys       uint64
 }
 
 func newMemtable(capacityBytes uint64) *memtable {
@@ -42,6 +43,7 @@ func newMemtable(capacityBytes uint64) *memtable {
 		height:        1,
 		capacityBytes: capacityBytes,
 		sizeBytes:     uint64(unsafe.Sizeof(*node)),
+		numKeys:       0,
 	}
 }
 
@@ -104,6 +106,7 @@ func (m *memtable) insert(key string, value []byte, seq uint64) {
 	}
 
 	m.sizeBytes += uint64(unsafe.Sizeof(*node) + uintptr(len(key)) + uintptr(len(value)))
+	m.numKeys++
 }
 
 func (m *memtable) delete(key string, seq uint64) {
@@ -145,6 +148,7 @@ func (m *memtable) delete(key string, seq uint64) {
 	}
 
 	m.sizeBytes += uint64(unsafe.Sizeof(*tombstone) + uintptr(len(key)))
+	m.numKeys++
 }
 
 func (m *memtable) randomLevel() int {

@@ -16,12 +16,12 @@ type wal struct {
 	crcTable      *crc32.Table
 }
 
-func newWal(logNumber uint64, lastSeq uint64, capacityBytes uint64) *wal {
+func newWal(logNumber uint64, lastSeq uint64, capacityBytes uint64, crcTable *crc32.Table) *wal {
 	return &wal{
 		logNumber:     logNumber,
 		lastSeq:       lastSeq,
 		capacityBytes: capacityBytes,
-		crcTable:      crc32.MakeTable(crc32.Castagnoli),
+		crcTable:      crcTable,
 	}
 }
 
