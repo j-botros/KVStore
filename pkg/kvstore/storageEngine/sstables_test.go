@@ -233,6 +233,51 @@ func TestNewSst_MultiBlock(t *testing.T) {
 	}
 }
 
+// TestNewSst_FooterRoundTrip writes an SST via newSst then calls readFooter to
+// verify the footer, index, and bloom filter are all written and parsed correctly.
+func TestNewSst_FooterRoundTrip(t *testing.T) {
+	setupTestDir(t)
+	crcTab := crc32.MakeTable(crc32.Castagnoli)
+
+	entries := []testEntry{
+		{key: "apple", value: []byte("red"), seq: 1},
+		{key: "banana", value: []byte("yellow"), seq: 2},
+		{key: "cherry", value: []byte("dark-red"), seq: 3},
+	}
+	m := newTestMemtable(t, entries)
+
+	s, err := newSst(1, m, crcTab)
+	if err != nil {
+		t.Fatalf("newSst: %v", err)
+	}
+
+	// Read the footer back from the file written by newSst.
+	idx, bf, err := s.readFooter()
+	if err != nil {
+		t.Fatalf("readFooter: %v", err)
+	}
+
+	// Index must be non-empty and its last block must cover the last key.
+	if idx == nil || len(*idx) == 0 {
+		t.Fatal("readFooter returned empty index")
+	}
+	last := (*idx)[len(*idx)-1]
+	if last.lastKey != "cherry" {
+		t.Errorf("index last block lastKey = %q, want %q", last.lastKey, "cherry")
+	}
+
+	// Bloom filter must be present and report inserted keys as potentially present.
+	if bf == nil {
+		t.Fatal("readFooter returned nil bloom filter")
+	}
+	for _, e := range entries {
+		if bf.keyNotPresent(e.key) {
+			t.Errorf("bloom filter reports %q not present after readFooter, want present", e.key)
+		}
+	}
+}
+
+
 
 func TestNewBlock(t *testing.T) {
 	lastKey := "zKey"

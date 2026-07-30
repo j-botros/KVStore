@@ -2,7 +2,6 @@ package storageengine
 
 import (
 	"testing"
-	"unsafe"
 )
 
 func TestNewNode(t *testing.T) {
@@ -50,10 +49,8 @@ func TestNewMemtable(t *testing.T) {
 	if m.capacityBytes != 1024 {
 		t.Errorf("capacityBytes = %d, want 1024", m.capacityBytes)
 	}
-
-	expectedSize := uint64(unsafe.Sizeof(node{}))
-	if m.sizeBytes != expectedSize {
-		t.Errorf("sizeBytes = %d, want %d", m.sizeBytes, expectedSize)
+	if m.sizeBytes != 0 {
+		t.Errorf("sizeBytes = %d, want %d", m.sizeBytes, 0)
 	}
 }
 

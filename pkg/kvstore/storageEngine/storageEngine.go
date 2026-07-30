@@ -5,9 +5,11 @@ import (
 )
 
 type StorageEngine struct {
-	memtable *memtable
-	disk     *disk
-	nextSeq  uint64
+	memtable      *memtable
+	memCapacity   uint64
+	fullMemtables []*memtable
+	disk          *disk
+	nextSeq       uint64
 }
 
 type disk struct {
@@ -67,8 +69,13 @@ func (e *StorageEngine) Delete(key string) error {
 	BACKGROUND METHODS
 ==================================================================================== */
 
-func (e *StorageEngine) FlushCache() error {
-	err := e.disk.sstables.flush(e.disk.nextFileNumber, e.memtable, e.disk.crcTable)
+func (e *StorageEngine) FlushMemtable() error {
+	// TODO: Create new Memtable to accept writes during flush process
+	oldMem := e.memtable
+	e.fullMemtables = append(e.fullMemtables, oldMem)
+	e.memtable = newMemtable(e.memCapacity)
+
+	err := e.disk.sstables.flush(e.disk.nextFileNumber, oldMem, e.disk.crcTable)
 	if err != nil {
 		return err
 	}

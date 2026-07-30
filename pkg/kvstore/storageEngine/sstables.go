@@ -220,6 +220,31 @@ func newSst(filenum uint64, memtable *memtable, crcTable *crc32.Table) (*sst, er
 
 	sst.index = &idx
 
+	// --- Index section ---
+	// Format per entry: keyLength(4) key offset(8) length(8)
+	indexOffset := uint64(fileBuffer.Len())
+	for _, block := range idx {
+		keyBytes := []byte(block.lastKey)
+		binary.Write(fileBuffer, binary.LittleEndian, uint32(len(keyBytes)))
+		fileBuffer.Write(keyBytes)
+		binary.Write(fileBuffer, binary.LittleEndian, block.offset)
+		binary.Write(fileBuffer, binary.LittleEndian, block.length)
+	}
+	indexLength := uint64(fileBuffer.Len()) - indexOffset
+
+	// --- Bloom filter section ---
+	bloomOffset := uint64(fileBuffer.Len())
+	fileBuffer.Write(bf.bitstring)
+	bloomLength := uint64(fileBuffer.Len()) - bloomOffset
+
+	// --- Footer section (40 bytes) ---
+	// indexOffset(8) indexLength(8) bloomOffset(8) bloomLength(8) magic(8)
+	binary.Write(fileBuffer, binary.LittleEndian, indexOffset)
+	binary.Write(fileBuffer, binary.LittleEndian, indexLength)
+	binary.Write(fileBuffer, binary.LittleEndian, bloomOffset)
+	binary.Write(fileBuffer, binary.LittleEndian, bloomLength)
+	binary.Write(fileBuffer, binary.LittleEndian, uint64(FOOTER_MAGIC))
+
 	// Write entire SSTable to disk in one call, then sync once
 	if _, err := sstFile.Write(fileBuffer.Bytes()); err != nil {
 		sstFile.Close()

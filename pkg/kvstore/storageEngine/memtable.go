@@ -2,11 +2,11 @@ package storageengine
 
 import (
 	"math/rand"
-	"unsafe"
 )
 
 const (
-	MAX_LEVELS int = 12
+	MAX_LEVELS           int    = 12
+	ENTRY_OVERHEAD_BYTES uint64 = 21 // seq(8) + tombstone(1) + keyLength(4) + valueLength(4) + checksum(4)
 )
 
 type node struct {
@@ -42,7 +42,7 @@ func newMemtable(capacityBytes uint64) *memtable {
 		head:          node,
 		height:        1,
 		capacityBytes: capacityBytes,
-		sizeBytes:     uint64(unsafe.Sizeof(*node)),
+		sizeBytes:     0,
 		numKeys:       0,
 	}
 }
@@ -84,13 +84,14 @@ func (m *memtable) insert(key string, value []byte, seq uint64) {
 	curr = curr.next[0]
 	if curr != nil && curr.key == key {
 		// Update in place
-		m.sizeBytes -= uint64(unsafe.Sizeof(*curr) + uintptr(len(curr.key)) + uintptr(len(curr.value)))
+		oldSize := entrySizeBytes(curr.key, curr.value)
 
 		curr.value = value
 		curr.seq = seq
 		curr.tombstone = false
 
-		m.sizeBytes += uint64(unsafe.Sizeof(*curr) + uintptr(len(curr.key)) + uintptr(len(curr.value)))
+		newSize := entrySizeBytes(curr.key, curr.value)
+		m.sizeBytes = m.sizeBytes - oldSize + newSize
 
 		return
 	}
@@ -105,7 +106,7 @@ func (m *memtable) insert(key string, value []byte, seq uint64) {
 		prevs[i].next[i] = node
 	}
 
-	m.sizeBytes += uint64(unsafe.Sizeof(*node) + uintptr(len(key)) + uintptr(len(value)))
+	m.sizeBytes += entrySizeBytes(key, value)
 	m.numKeys++
 }
 
@@ -128,11 +129,14 @@ func (m *memtable) delete(key string, seq uint64) {
 	curr = curr.next[0]
 	if curr != nil && curr.key == key {
 		// Update in place
-		m.sizeBytes -= uint64(len(curr.value))
+		oldSize := entrySizeBytes(curr.key, curr.value)
 
 		curr.value = []byte{}
 		curr.seq = seq
 		curr.tombstone = true
+
+		newSize := entrySizeBytes(curr.key, curr.value)
+		m.sizeBytes = m.sizeBytes - oldSize + newSize
 
 		return
 	}
@@ -147,7 +151,7 @@ func (m *memtable) delete(key string, seq uint64) {
 		prevs[i].next[i] = tombstone
 	}
 
-	m.sizeBytes += uint64(unsafe.Sizeof(*tombstone) + uintptr(len(key)))
+	m.sizeBytes += entrySizeBytes(key, []byte{})
 	m.numKeys++
 }
 
@@ -157,4 +161,8 @@ func (m *memtable) randomLevel() int {
 		level++
 	}
 	return level
+}
+
+func entrySizeBytes(key string, value []byte) uint64 {
+	return ENTRY_OVERHEAD_BYTES + uint64(len(key)+len(value))
 }
