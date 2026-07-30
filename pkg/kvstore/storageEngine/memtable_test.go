@@ -37,8 +37,7 @@ func TestNewNode(t *testing.T) {
 }
 
 func TestNewMemtable(t *testing.T) {
-	capacityBytes := uint64(1024)
-	m := newMemtable(capacityBytes)
+	m := newMemtable()
 
 	if m.head == nil {
 		t.Fatal("head is nil")
@@ -46,17 +45,13 @@ func TestNewMemtable(t *testing.T) {
 	if m.height != 1 {
 		t.Errorf("height = %d, want 1", m.height)
 	}
-	if m.capacityBytes != 1024 {
-		t.Errorf("capacityBytes = %d, want 1024", m.capacityBytes)
-	}
 	if m.sizeBytes != 0 {
-		t.Errorf("sizeBytes = %d, want %d", m.sizeBytes, 0)
+		t.Errorf("sizeBytes = %d, want 0", m.sizeBytes)
 	}
 }
 
 func TestMemtable_InsertAndGet(t *testing.T) {
-	capacityBytes := uint64(4096)
-	m := newMemtable(capacityBytes)
+	m := newMemtable()
 
 	entries := []struct {
 		key string
@@ -88,8 +83,7 @@ func TestMemtable_InsertAndGet(t *testing.T) {
 }
 
 func TestMemtable_Get_NotFound(t *testing.T) {
-	capacityBytes := uint64(4096)
-	m := newMemtable(capacityBytes)
+	m := newMemtable()
 	key1 := "exists"
 	val1 := []byte("v")
 	seq1 := uint64(1)
@@ -103,7 +97,7 @@ func TestMemtable_Get_NotFound(t *testing.T) {
 }
 
 func TestMemtable_Get_EmptyTable(t *testing.T) {
-	m := newMemtable(4096)
+	m := newMemtable()
 
 	key := "anything"
 	_, err := m.get(key)
@@ -113,8 +107,7 @@ func TestMemtable_Get_EmptyTable(t *testing.T) {
 }
 
 func TestMemtable_InsertOverwrite(t *testing.T) {
-	capacityBytes := uint64(4096)
-	m := newMemtable(capacityBytes)
+	m := newMemtable()
 	key1 := "key"
 	val1 := []byte("first")
 	seq1 := uint64(1)
@@ -136,8 +129,7 @@ func TestMemtable_InsertOverwrite(t *testing.T) {
 }
 
 func TestMemtable_Delete(t *testing.T) {
-	capacityBytes := uint64(4096)
-	m := newMemtable(capacityBytes)
+	m := newMemtable()
 	key1 := "key"
 	val1 := []byte("val")
 	seq1 := uint64(1)
@@ -155,8 +147,7 @@ func TestMemtable_Delete(t *testing.T) {
 }
 
 func TestMemtable_DeleteNonExistent(t *testing.T) {
-	capacityBytes := uint64(4096)
-	m := newMemtable(capacityBytes)
+	m := newMemtable()
 	// Deleting a key that was never inserted should create a tombstone.
 	key1 := "ghost"
 	seq1 := uint64(1)
@@ -170,8 +161,7 @@ func TestMemtable_DeleteNonExistent(t *testing.T) {
 }
 
 func TestMemtable_ReinsertAfterDelete(t *testing.T) {
-	capacityBytes := uint64(4096)
-	m := newMemtable(capacityBytes)
+	m := newMemtable()
 	key1 := "key"
 	val1 := []byte("v1")
 	seq1 := uint64(1)
@@ -197,8 +187,7 @@ func TestMemtable_ReinsertAfterDelete(t *testing.T) {
 }
 
 func TestMemtable_OrderedTraversal(t *testing.T) {
-	capacityBytes := uint64(4096)
-	m := newMemtable(capacityBytes)
+	m := newMemtable()
 	keys := []string{"delta", "alpha", "charlie", "bravo"}
 	for i, k := range keys {
 		key := k
@@ -225,8 +214,7 @@ func TestMemtable_OrderedTraversal(t *testing.T) {
 }
 
 func TestMemtable_SizeTracking(t *testing.T) {
-	capacityBytes := uint64(4096)
-	m := newMemtable(capacityBytes)
+	m := newMemtable()
 	initial := m.sizeBytes
 
 	// Insert: sizeBytes must grow.
@@ -260,8 +248,7 @@ func TestMemtable_SizeTracking(t *testing.T) {
 }
 
 func TestRandomLevel(t *testing.T) {
-	capacityBytes := uint64(4096)
-	m := newMemtable(capacityBytes)
+	m := newMemtable()
 	for i := 0; i < 1000; i++ {
 		level := m.randomLevel()
 		if level < 1 || level > MAX_LEVELS {

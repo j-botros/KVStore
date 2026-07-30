@@ -29,21 +29,19 @@ func newNode(key string, value []byte, level int, seq uint64, tombstone bool) *n
 }
 
 type memtable struct {
-	head          *node
-	height        int
-	capacityBytes uint64
-	sizeBytes     uint64
-	numKeys       uint64
+	head      *node
+	height    int
+	sizeBytes uint64
+	numKeys   uint64
 }
 
-func newMemtable(capacityBytes uint64) *memtable {
+func newMemtable() *memtable {
 	node := newNode("", nil, MAX_LEVELS, 0, false)
 	return &memtable{
-		head:          node,
-		height:        1,
-		capacityBytes: capacityBytes,
-		sizeBytes:     0,
-		numKeys:       0,
+		head:      node,
+		height:    1,
+		sizeBytes: 0,
+		numKeys:   0,
 	}
 }
 

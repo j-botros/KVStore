@@ -10,18 +10,16 @@ import (
 )
 
 type wal struct {
-	logNumber     uint64
-	lastSeq       uint64
-	capacityBytes uint64 // TODO: Track size of file
-	crcTable      *crc32.Table
+	logNumber uint64
+	lastSeq   uint64
+	crcTable  *crc32.Table
 }
 
-func newWal(logNumber uint64, lastSeq uint64, capacityBytes uint64, crcTable *crc32.Table) *wal {
+func newWal(logNumber uint64, crcTable *crc32.Table) *wal {
 	return &wal{
-		logNumber:     logNumber,
-		lastSeq:       lastSeq,
-		capacityBytes: capacityBytes,
-		crcTable:      crcTable,
+		logNumber: logNumber,
+		lastSeq:   0,
+		crcTable:  crcTable,
 	}
 }
 

@@ -11,20 +11,15 @@ import (
 
 func TestNewWal(t *testing.T) {
 	logNumber := uint64(5)
-	lastSeq := uint64(10)
-	capacityBytes := uint64(2048)
 	crcTable := crc32.MakeTable(crc32.Castagnoli)
 
-	w := newWal(logNumber, lastSeq, capacityBytes, crcTable)
+	w := newWal(logNumber, crcTable)
 
 	if w.logNumber != 5 {
 		t.Errorf("logNumber = %d, want 5", w.logNumber)
 	}
-	if w.lastSeq != 10 {
-		t.Errorf("lastSeq = %d, want 10", w.lastSeq)
-	}
-	if w.capacityBytes != 2048 {
-		t.Errorf("capacityBytes = %d, want 2048", w.capacityBytes)
+	if w.lastSeq != 0 {
+		t.Errorf("lastSeq = %d, want 0 (initial value)", w.lastSeq)
 	}
 	if w.crcTable == nil {
 		t.Error("crcTable is nil")
@@ -35,11 +30,8 @@ func TestWriteLog_BasicWrite(t *testing.T) {
 	setupTestDir(t)
 	os.MkdirAll("data/wal", 0755)
 
-	logNumber := uint64(1)
-	lastSeq := uint64(0)
-	capacityBytes := uint64(4096)
 	crcTable := crc32.MakeTable(crc32.Castagnoli)
-	w := newWal(logNumber, lastSeq, capacityBytes, crcTable)
+	w := newWal(1, crcTable)
 	key := "hello"
 	val := []byte("world")
 	tombstone := false
@@ -62,11 +54,8 @@ func TestWriteLog_VerifyFormat(t *testing.T) {
 	setupTestDir(t)
 	os.MkdirAll("data/wal", 0755)
 
-	logNumber := uint64(1)
-	lastSeq := uint64(0)
-	capacityBytes := uint64(4096)
 	crcTable := crc32.MakeTable(crc32.Castagnoli)
-	w := newWal(logNumber, lastSeq, capacityBytes, crcTable)
+	w := newWal(1, crcTable)
 
 	key := "key1"
 	val := []byte("val1")
@@ -136,11 +125,8 @@ func TestWriteLog_Tombstone(t *testing.T) {
 	setupTestDir(t)
 	os.MkdirAll("data/wal", 0755)
 
-	logNumber := uint64(1)
-	lastSeq := uint64(0)
-	capacityBytes := uint64(4096)
 	crcTable := crc32.MakeTable(crc32.Castagnoli)
-	w := newWal(logNumber, lastSeq, capacityBytes, crcTable)
+	w := newWal(1, crcTable)
 
 	key := "delkey"
 	val := []byte{}
@@ -174,11 +160,8 @@ func TestWriteLog_MultipleEntries(t *testing.T) {
 	setupTestDir(t)
 	os.MkdirAll("data/wal", 0755)
 
-	logNumber := uint64(1)
-	lastSeq := uint64(0)
-	capacityBytes := uint64(4096)
 	crcTable := crc32.MakeTable(crc32.Castagnoli)
-	w := newWal(logNumber, lastSeq, capacityBytes, crcTable)
+	w := newWal(1, crcTable)
 
 	entries := []struct {
 		key   string
@@ -250,11 +233,8 @@ func TestWriteLog_UpdatesLastSeq(t *testing.T) {
 	setupTestDir(t)
 	os.MkdirAll("data/wal", 0755)
 
-	logNumber := uint64(1)
-	lastSeq := uint64(0)
-	capacityBytes := uint64(4096)
 	crcTable := crc32.MakeTable(crc32.Castagnoli)
-	w := newWal(logNumber, lastSeq, capacityBytes, crcTable)
+	w := newWal(1, crcTable)
 
 	key1 := "k"
 	val1 := []byte("v")

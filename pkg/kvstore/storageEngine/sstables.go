@@ -68,8 +68,8 @@ func (sstables *sstables) get(key string) (value []byte, err error) {
 	return nil, ErrKeyNotFound
 }
 
-func (sstables *sstables) flush(filenum uint64, memtable *memtable, crcTable *crc32.Table) error {
-	newSst, err := newSst(filenum, memtable, crcTable)
+func (sstables *sstables) flush(filenum uint64, memtable *memtable) error {
+	newSst, err := newSst(filenum, memtable, sstables.crcTable)
 	if err != nil {
 		return err
 	}

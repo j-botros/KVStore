@@ -135,7 +135,7 @@ func writeSyntheticSST(t *testing.T, level uint, filenum uint64, entries []testE
 // Entries MUST be provided in ascending key order.
 func newTestMemtable(t *testing.T, entries []testEntry) *memtable {
 	t.Helper()
-	m := newMemtable(64 * 1024 * 1024) // 64 MB capacity
+	m := newMemtable()
 	for _, e := range entries {
 		if e.tombstone {
 			m.delete(e.key, e.seq)

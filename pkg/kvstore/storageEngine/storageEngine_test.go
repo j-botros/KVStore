@@ -18,18 +18,17 @@ func newTestEngine(t *testing.T) *StorageEngine {
 	crcTable := crc32.MakeTable(crc32.Castagnoli)
 
 	return &StorageEngine{
-		memtable: newMemtable(4096),
-		disk: &disk{
-			nextFileNumber: 1,
-			wal:            newWal(1, 0, 4096, crcTable),
-			sstables: &sstables{
-				levels:   1,
-				sstList:  make([][]*sst, 1),
-				crcTable: crcTable,
-			},
+		memCapacity:    4096,
+		crcTable:       crcTable,
+		nextFileNumber: 1,
+		nextSeq:        1,
+		active:         newMemlog(1, crcTable),
+		immutables:     make([]*memlog, 0),
+		sstables: &sstables{
+			levels:   1,
+			sstList:  make([][]*sst, 1),
 			crcTable: crcTable,
 		},
-		nextSeq: 1,
 	}
 }
 
@@ -152,3 +151,33 @@ func TestStorageEngine_SequenceIncrement(t *testing.T) {
 		t.Errorf("after second Put: nextSeq = %d, want %d", e.nextSeq, initial+3)
 	}
 }
+
+func TestStorageEngine_Flush(t *testing.T) {
+	e := newTestEngine(t)
+
+	e.Put("k1", []byte("v1"))
+	e.Put("k2", []byte("v2"))
+
+	if err := e.Flush(); err != nil {
+		t.Fatalf("Flush failed: %v", err)
+	}
+
+	// Verify key can still be retrieved after flush to SSTable
+	val, err := e.Get("k1")
+	if err != nil {
+		t.Fatalf("Get(\"k1\") after Flush: %v", err)
+	}
+	if string(val) != "v1" {
+		t.Errorf("Get(\"k1\") = %q, want \"v1\"", val)
+	}
+
+	// Verify immutables queue is empty after flush completed
+	e.mu.RLock()
+	immLen := len(e.immutables)
+	e.mu.RUnlock()
+
+	if immLen != 0 {
+		t.Errorf("len(immutables) = %d, want 0 after Flush", immLen)
+	}
+}
+
