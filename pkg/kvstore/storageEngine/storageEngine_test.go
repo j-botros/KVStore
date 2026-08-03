@@ -25,8 +25,7 @@ func newTestEngine(t *testing.T) *StorageEngine {
 		active:         newMemlog(1, crcTable),
 		immutables:     make([]*memlog, 0),
 		sstables: &sstables{
-			levels:   1,
-			sstList:  make([][]*sst, 1),
+			levels:   []*level{newLevel(0)}, // level 0, no capacity limit yet
 			crcTable: crcTable,
 		},
 	}

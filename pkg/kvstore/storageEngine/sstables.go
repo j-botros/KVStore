@@ -8,35 +8,82 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 )
 
 /* ====================================================================================
 	SSTABLES CLASS
 ==================================================================================== */
 
+type level struct {
+	sstList       []*sst
+	capacityBytes uint64
+	sizeBytes     uint64
+}
+
+func newLevel(capacityBytes uint64) *level {
+	return &level{
+		sstList:       make([]*sst, 0),
+		capacityBytes: capacityBytes,
+		sizeBytes:     0,
+	}
+}
+
+// Use this when adding a single SST during compaction to keep L1+ sorted.
+func (l *level) insertSorted(s *sst) {
+	i := sort.Search(len(l.sstList), func(i int) bool {
+		return l.sstList[i].startKey >= s.startKey
+	})
+	l.sstList = append(l.sstList, nil)
+	copy(l.sstList[i+1:], l.sstList[i:])
+	l.sstList[i] = s
+}
+
+// Use this once after bulk-loading SSTs from disk on startup.
+func (l *level) sortByStartKey() {
+	sort.Slice(l.sstList, func(i, j int) bool {
+		return l.sstList[i].startKey < l.sstList[j].startKey
+	})
+}
+
 type sstables struct {
-	levels   uint
-	sstList  [][]*sst
-	crcTable *crc32.Table
+	levels       []*level
+	l0Capacity   uint64
+	growthFactor int
+	crcTable     *crc32.Table
+}
+
+func newSstables(l0Capacity uint64, growthFactor int, crcTable *crc32.Table) *sstables {
+	sstables := &sstables{
+		levels:       make([]*level, 1),
+		l0Capacity:   l0Capacity,
+		growthFactor: growthFactor,
+		crcTable:     crcTable,
+	}
+
+	sstables.levels[0] = newLevel(l0Capacity)
+
+	return sstables
 }
 
 func (sstables *sstables) get(key string) (value []byte, err error) {
+	// Level 0: SSTs may overlap, search all and pick highest seq
 	seq := uint64(0)
 	tombstone := false
-	for _, sst := range sstables.sstList[0] {
+	for _, sst := range sstables.levels[0].sstList {
 		if key >= sst.startKey && key <= sst.endKey {
-			curValue, curTombstone, curSeq, err := sst.search(key)
+			entry, err := sst.search(key)
 
-			if !curTombstone && err == ErrKeyNotFound {
+			if err == ErrKeyNotFound {
 				continue
 			} else if err != nil {
 				return nil, err
 			}
 
-			if curSeq >= seq {
-				seq = curSeq
-				value = curValue
-				tombstone = curTombstone
+			if entry.seq >= seq {
+				seq = entry.seq
+				value = entry.value
+				tombstone = entry.tombstone
 			}
 		}
 	}
@@ -47,20 +94,23 @@ func (sstables *sstables) get(key string) (value []byte, err error) {
 		return value, nil
 	}
 
-	for level := uint(1); level < sstables.levels; level++ {
-		for _, sst := range sstables.sstList[level] {
+	// Level 1+: SSTs are non-overlapping; first match wins
+	for _, lvl := range sstables.levels[1:] {
+		for _, sst := range lvl.sstList {
 			if key >= sst.startKey && key <= sst.endKey {
-				value, tombstone, _, err = sst.search(key)
+				entry, err := sst.search(key)
 
-				if tombstone {
-					return nil, ErrKeyNotFound
-				} else if err == ErrKeyNotFound {
+				if err == ErrKeyNotFound {
 					continue
 				} else if err != nil {
 					return nil, err
 				}
 
-				return value, nil
+				if entry.tombstone {
+					return nil, ErrKeyNotFound
+				}
+
+				return entry.value, nil
 			}
 		}
 	}
@@ -69,12 +119,14 @@ func (sstables *sstables) get(key string) (value []byte, err error) {
 }
 
 func (sstables *sstables) flush(filenum uint64, memtable *memtable) error {
-	newSst, err := newSst(filenum, memtable, sstables.crcTable)
+	newSst, err := newSstFromMemtable(filenum, memtable, sstables.crcTable)
 	if err != nil {
 		return err
 	}
 
-	sstables.sstList[0] = append(sstables.sstList[0], newSst)
+	l0 := sstables.levels[0]
+	l0.sstList = append(l0.sstList, newSst)
+	l0.sizeBytes += memtable.sizeBytes
 	return nil
 }
 
@@ -85,7 +137,7 @@ func (sstables *sstables) flush(filenum uint64, memtable *memtable) error {
 type sst struct {
 	// SST file data
 	filenum  uint64
-	level    uint
+	level    int
 	lastSeq  uint64
 	startKey string
 	endKey   string
@@ -110,7 +162,17 @@ const (
 	TARGET_BLOCK_SIZE = 4 * 1024 // 4 KB
 )
 
-func newSst(filenum uint64, memtable *memtable, crcTable *crc32.Table) (*sst, error) {
+func newSst(filenum uint64, lvl int, crcTable *crc32.Table) *sst {
+	sst := &sst{
+		filenum:  filenum,
+		level:    lvl,
+		crcTable: crcTable,
+	}
+
+	return sst
+}
+
+func newSstFromMemtable(filenum uint64, memtable *memtable, crcTable *crc32.Table) (*sst, error) {
 	sst := &sst{
 		filenum:  filenum,
 		level:    0,
@@ -265,16 +327,16 @@ func newSst(filenum uint64, memtable *memtable, crcTable *crc32.Table) (*sst, er
 	return sst, nil
 }
 
-func (sst *sst) search(key string) (value []byte, isTombstone bool, seq uint64, err error) {
+func (sst *sst) search(key string) (e *entry, err error) {
 	// Check bloom filter
 	if sst.bloomFilter.keyNotPresent(key) {
-		return nil, false, 0, ErrKeyNotFound
+		return nil, ErrKeyNotFound
 	}
 
 	// Find data block in SST from index
 	blockOffset, blockLength, err := sst.index.getDatablock(key)
 	if err != nil {
-		return nil, false, 0, err
+		return nil, err
 	}
 
 	// Read from file
@@ -282,102 +344,105 @@ func (sst *sst) search(key string) (value []byte, isTombstone bool, seq uint64, 
 
 	sstFile, err := os.Open(filename)
 	if err != nil {
-		return nil, false, 0, err
+		return nil, err
 	}
 	defer sstFile.Close()
 
 	r := io.NewSectionReader(sstFile, int64(blockOffset), int64(blockLength))
 	for {
-		buf := new(bytes.Buffer)
-
-		// Read: seq (8 bytes)
-		err = binary.Read(r, binary.LittleEndian, &seq)
-		if err == io.EOF {
+		e, err := readEntry(r, sst.crcTable)
+		if err == ErrEntryNotFound {
 			break
 		} else if err != nil {
-			return nil, false, 0, err
+			return nil, err
 		}
 
-		err = binary.Write(buf, binary.LittleEndian, seq)
-		if err != nil {
-			return nil, false, 0, err
-		}
-
-		// Read: tombstone (1 byte)
-		var tombstone byte
-
-		err = binary.Read(r, binary.LittleEndian, &tombstone)
-		if err != nil {
-			return nil, false, 0, err
-		}
-
-		err = buf.WriteByte(tombstone)
-		if err != nil {
-			return nil, false, 0, err
-		}
-
-		// Read: key length (4 bytes)
-		var keyLength uint32
-
-		err = binary.Read(r, binary.LittleEndian, &keyLength)
-		if err != nil {
-			return nil, false, 0, err
-		}
-
-		err = binary.Write(buf, binary.LittleEndian, keyLength)
-		if err != nil {
-			return nil, false, 0, err
-		}
-
-		// Read: key
-		keyBuf := make([]byte, keyLength)
-		_, err := io.ReadFull(r, keyBuf)
-		if err != nil {
-			return nil, false, 0, err
-		}
-		buf.Write(keyBuf)
-		ekey := string(keyBuf)
-
-		// Read: value length (4 bytes)
-		var valLength uint32
-
-		err = binary.Read(r, binary.LittleEndian, &valLength)
-		if err != nil {
-			return nil, false, 0, err
-		}
-
-		err = binary.Write(buf, binary.LittleEndian, valLength)
-		if err != nil {
-			return nil, false, 0, err
-		}
-
-		// Read: value
-		value = make([]byte, valLength)
-		_, err = io.ReadFull(r, value)
-		if err != nil {
-			return nil, false, 0, err
-		}
-		buf.Write(value)
-
-		// Read: checksum (4 bytes)
-		var checksum uint32
-
-		err = binary.Read(r, binary.LittleEndian, &checksum)
-		if err != nil {
-			return nil, false, 0, err
-		}
-
-		if key == ekey {
-			expected := crc32.Checksum(buf.Bytes(), sst.crcTable)
-			if checksum != expected {
-				return nil, false, 0, ErrBadData
-			}
-
-			return value, tombstone == 1, seq, nil
+		if key == e.key {
+			return e, nil
 		}
 	}
 
-	return nil, false, 0, ErrKeyNotFound
+	return nil, ErrKeyNotFound
+}
+
+func (newSst *sst) compact(curSst *sst, nextSst *sst) error {
+	// Create newSst file
+	filename := fmt.Sprintf("data/sstables/level-%d/%d.sst", newSst.level, newSst.filenum)
+
+	dir := filepath.Dir(filename)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return err
+	}
+
+	newFile, err := os.OpenFile(
+		filename,
+		os.O_APPEND|os.O_CREATE|os.O_WRONLY,
+		0644,
+	)
+	if err != nil {
+		return err
+	}
+	defer newFile.Close()
+
+	// Open curSst file
+	filename = fmt.Sprintf("data/sstables/level-%d/%d.sst", curSst.level, curSst.filenum)
+
+	dir = filepath.Dir(filename)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return err
+	}
+
+	curFile, err := os.Open(filename)
+	if err != nil {
+		return err
+	}
+	defer curFile.Close()
+
+	lastBlock := (*curSst.index)[len(*curSst.index)-1]
+	contentSize := int64(lastBlock.offset + lastBlock.length)
+	curRdr := io.NewSectionReader(curFile, 0, contentSize)
+
+	// Open nextSst file
+	filename = fmt.Sprintf("data/sstables/level-%d/%d.sst", nextSst.level, nextSst.filenum)
+
+	dir = filepath.Dir(filename)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return err
+	}
+
+	nextFile, err := os.Open(filename)
+	if err != nil {
+		return err
+	}
+	defer nextFile.Close()
+
+	lastBlock = (*nextSst.index)[len(*nextSst.index)-1]
+	contentSize = int64(lastBlock.offset + lastBlock.length)
+	nextRdr := io.NewSectionReader(nextFile, 0, contentSize)
+
+	// Read each entry in alphabetical order
+	curEntry, err := readEntry(curRdr, newSst.crcTable)
+	if err != nil {
+		return err
+	}
+
+	nextEntry, err := readEntry(nextRdr, newSst.crcTable)
+	if err != nil {
+		return err
+	}
+
+	for {
+		if curEntry.key == nextEntry.key {
+			// TODO: Write entry with higher seq
+
+		} else if curEntry.key < nextEntry.key {
+			// TODO: Write curEntry
+
+		} else {
+			// TODO: Write nextEntry
+
+		}
+	}
 }
 
 type block struct {
@@ -500,4 +565,106 @@ func (sst *sst) readFooter() (idx *index, bf *bloomFilter, err error) {
 	bf.bitstring = bfBuf
 
 	return idx, bf, nil
+}
+
+type entry struct {
+	seq       uint64
+	tombstone bool
+	key       string
+	value     []byte
+}
+
+func readEntry(r *io.SectionReader, crcTable *crc32.Table) (*entry, error) {
+	buf := new(bytes.Buffer)
+
+	// Read: seq (8 bytes)
+	var seq uint64
+
+	err := binary.Read(r, binary.LittleEndian, &seq)
+	if err == io.EOF {
+		return nil, ErrEntryNotFound
+	} else if err != nil {
+		return nil, err
+	}
+
+	err = binary.Write(buf, binary.LittleEndian, seq)
+	if err != nil {
+		return nil, err
+	}
+
+	// Read: tombstone (1 byte)
+	var tombstone byte
+
+	err = binary.Read(r, binary.LittleEndian, &tombstone)
+	if err != nil {
+		return nil, err
+	}
+
+	err = buf.WriteByte(tombstone)
+	if err != nil {
+		return nil, err
+	}
+
+	// Read: key length (4 bytes)
+	var keyLength uint32
+
+	err = binary.Read(r, binary.LittleEndian, &keyLength)
+	if err != nil {
+		return nil, err
+	}
+
+	err = binary.Write(buf, binary.LittleEndian, keyLength)
+	if err != nil {
+		return nil, err
+	}
+
+	// Read: key
+	keyBuf := make([]byte, keyLength)
+	_, err = io.ReadFull(r, keyBuf)
+	if err != nil {
+		return nil, err
+	}
+	buf.Write(keyBuf)
+	key := string(keyBuf)
+
+	// Read: value length (4 bytes)
+	var valLength uint32
+
+	err = binary.Read(r, binary.LittleEndian, &valLength)
+	if err != nil {
+		return nil, err
+	}
+
+	err = binary.Write(buf, binary.LittleEndian, valLength)
+	if err != nil {
+		return nil, err
+	}
+
+	// Read: value
+	value := make([]byte, valLength)
+	_, err = io.ReadFull(r, value)
+	if err != nil {
+		return nil, err
+	}
+	buf.Write(value)
+
+	// Read: checksum (4 bytes)
+	var checksum uint32
+
+	err = binary.Read(r, binary.LittleEndian, &checksum)
+	if err != nil {
+		return nil, err
+	}
+
+	expected := crc32.Checksum(buf.Bytes(), crcTable)
+	if checksum != expected {
+		return nil, ErrBadData
+	}
+
+	return &entry{
+		seq:       seq,
+		tombstone: tombstone == 1,
+		key:       key,
+		value:     value,
+	}, nil
 }

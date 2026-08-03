@@ -39,7 +39,7 @@ type testEntry struct {
 // All entries are placed in a single data block.
 // Entries MUST be provided in ascending key order.
 // Returns an *sst struct with the index, bloom filter, and CRC table populated.
-func writeSyntheticSST(t *testing.T, level uint, filenum uint64, entries []testEntry, crcTab *crc32.Table) *sst {
+func writeSyntheticSST(t *testing.T, level int, filenum uint64, entries []testEntry, crcTab *crc32.Table) *sst {
 	t.Helper()
 
 	dir := fmt.Sprintf("data/sstables/level-%d", level)

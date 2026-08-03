@@ -23,7 +23,7 @@ func TestNewSst_Metadata(t *testing.T) {
 	}
 	m := newTestMemtable(t, entries)
 
-	s, err := newSst(1, m, crcTab)
+	s, err := newSstFromMemtable(1, m, crcTab)
 	if err != nil {
 		t.Fatalf("newSst: %v", err)
 	}
@@ -57,7 +57,7 @@ func TestNewSst_IndexBuilt(t *testing.T) {
 	}
 	m := newTestMemtable(t, entries)
 
-	s, err := newSst(1, m, crcTab)
+	s, err := newSstFromMemtable(1, m, crcTab)
 	if err != nil {
 		t.Fatalf("newSst: %v", err)
 	}
@@ -87,7 +87,7 @@ func TestNewSst_BloomFilter(t *testing.T) {
 	}
 	m := newTestMemtable(t, entries)
 
-	s, err := newSst(1, m, crcTab)
+	s, err := newSstFromMemtable(1, m, crcTab)
 	if err != nil {
 		t.Fatalf("newSst: %v", err)
 	}
@@ -114,7 +114,7 @@ func TestNewSst_FileCreated(t *testing.T) {
 	}
 	m := newTestMemtable(t, entries)
 
-	if _, err := newSst(7, m, crcTab); err != nil {
+	if _, err := newSstFromMemtable(7, m, crcTab); err != nil {
 		t.Fatalf("newSst: %v", err)
 	}
 
@@ -135,25 +135,25 @@ func TestNewSst_RoundTrip(t *testing.T) {
 	}
 	m := newTestMemtable(t, entries)
 
-	s, err := newSst(1, m, crcTab)
+	s, err := newSstFromMemtable(1, m, crcTab)
 	if err != nil {
 		t.Fatalf("newSst: %v", err)
 	}
 
 	for _, e := range entries {
-		val, isTombstone, seq, err := s.search(e.key)
+		result, err := s.search(e.key)
 		if err != nil {
 			t.Errorf("search(%q): %v", e.key, err)
 			continue
 		}
-		if isTombstone {
-			t.Errorf("search(%q): isTombstone = true, want false", e.key)
+		if result.tombstone {
+			t.Errorf("search(%q): tombstone = true, want false", e.key)
 		}
-		if string(val) != string(e.value) {
-			t.Errorf("search(%q): value = %q, want %q", e.key, val, e.value)
+		if string(result.value) != string(e.value) {
+			t.Errorf("search(%q): value = %q, want %q", e.key, result.value, e.value)
 		}
-		if seq != e.seq {
-			t.Errorf("search(%q): seq = %d, want %d", e.key, seq, e.seq)
+		if result.seq != e.seq {
+			t.Errorf("search(%q): seq = %d, want %d", e.key, result.seq, e.seq)
 		}
 	}
 }
@@ -168,20 +168,20 @@ func TestNewSst_RoundTrip_Tombstone(t *testing.T) {
 	}
 	m := newTestMemtable(t, entries)
 
-	s, err := newSst(1, m, crcTab)
+	s, err := newSstFromMemtable(1, m, crcTab)
 	if err != nil {
 		t.Fatalf("newSst: %v", err)
 	}
 
-	_, isTombstone, seq, err := s.search("dead")
+	result, err := s.search("dead")
 	if err != nil {
 		t.Fatalf("search(\"dead\"): %v", err)
 	}
-	if !isTombstone {
-		t.Error("isTombstone = false, want true")
+	if !result.tombstone {
+		t.Error("tombstone = false, want true")
 	}
-	if seq != 5 {
-		t.Errorf("seq = %d, want 5", seq)
+	if result.seq != 5 {
+		t.Errorf("seq = %d, want 5", result.seq)
 	}
 }
 
@@ -206,7 +206,7 @@ func TestNewSst_MultiBlock(t *testing.T) {
 	}
 	m := newTestMemtable(t, entries)
 
-	s, err := newSst(1, m, crcTab)
+	s, err := newSstFromMemtable(1, m, crcTab)
 	if err != nil {
 		t.Fatalf("newSst: %v", err)
 	}
@@ -217,19 +217,19 @@ func TestNewSst_MultiBlock(t *testing.T) {
 
 	// Spot-check: first and last entries must be readable.
 	first := entries[0]
-	val, _, _, err := s.search(first.key)
+	result, err := s.search(first.key)
 	if err != nil {
 		t.Errorf("search(%q): %v", first.key, err)
-	} else if string(val) != string(first.value) {
-		t.Errorf("search(%q) = %q, want %q", first.key, val, first.value)
+	} else if string(result.value) != string(first.value) {
+		t.Errorf("search(%q) = %q, want %q", first.key, result.value, first.value)
 	}
 
 	last := entries[len(entries)-1]
-	val, _, _, err = s.search(last.key)
+	result, err = s.search(last.key)
 	if err != nil {
 		t.Errorf("search(%q): %v", last.key, err)
-	} else if string(val) != string(last.value) {
-		t.Errorf("search(%q) = %q, want %q", last.key, val, last.value)
+	} else if string(result.value) != string(last.value) {
+		t.Errorf("search(%q) = %q, want %q", last.key, result.value, last.value)
 	}
 }
 
@@ -246,7 +246,7 @@ func TestNewSst_FooterRoundTrip(t *testing.T) {
 	}
 	m := newTestMemtable(t, entries)
 
-	s, err := newSst(1, m, crcTab)
+	s, err := newSstFromMemtable(1, m, crcTab)
 	if err != nil {
 		t.Fatalf("newSst: %v", err)
 	}
@@ -276,8 +276,6 @@ func TestNewSst_FooterRoundTrip(t *testing.T) {
 		}
 	}
 }
-
-
 
 func TestNewBlock(t *testing.T) {
 	lastKey := "zKey"
@@ -380,19 +378,18 @@ func TestSst_Search_Found(t *testing.T) {
 	}
 	s := writeSyntheticSST(t, 0, 1, entries, crcTab)
 
-	key := "banana"
-	val, isTombstone, seq, err := s.search(key)
+	result, err := s.search("banana")
 	if err != nil {
 		t.Fatalf("search(\"banana\"): %v", err)
 	}
-	if isTombstone {
-		t.Error("isTombstone = true, want false")
+	if result.tombstone {
+		t.Error("tombstone = true, want false")
 	}
-	if string(val) != "yellow" {
-		t.Errorf("value = %q, want %q", val, "yellow")
+	if string(result.value) != "yellow" {
+		t.Errorf("value = %q, want %q", result.value, "yellow")
 	}
-	if seq != 2 {
-		t.Errorf("seq = %d, want 2", seq)
+	if result.seq != 2 {
+		t.Errorf("seq = %d, want 2", result.seq)
 	}
 }
 
@@ -406,13 +403,12 @@ func TestSst_Search_FirstEntry(t *testing.T) {
 	}
 	s := writeSyntheticSST(t, 0, 1, entries, crcTab)
 
-	key := "alpha"
-	val, _, _, err := s.search(key)
+	result, err := s.search("alpha")
 	if err != nil {
 		t.Fatalf("search(\"alpha\"): %v", err)
 	}
-	if string(val) != "first" {
-		t.Errorf("value = %q, want %q", val, "first")
+	if string(result.value) != "first" {
+		t.Errorf("value = %q, want %q", result.value, "first")
 	}
 }
 
@@ -427,16 +423,15 @@ func TestSst_Search_LastEntry(t *testing.T) {
 	}
 	s := writeSyntheticSST(t, 0, 1, entries, crcTab)
 
-	key := "gamma"
-	val, _, seq, err := s.search(key)
+	result, err := s.search("gamma")
 	if err != nil {
 		t.Fatalf("search(\"gamma\"): %v", err)
 	}
-	if string(val) != "third" {
-		t.Errorf("value = %q, want %q", val, "third")
+	if string(result.value) != "third" {
+		t.Errorf("value = %q, want %q", result.value, "third")
 	}
-	if seq != 3 {
-		t.Errorf("seq = %d, want 3", seq)
+	if result.seq != 3 {
+		t.Errorf("seq = %d, want 3", result.seq)
 	}
 }
 
@@ -449,16 +444,15 @@ func TestSst_Search_Tombstone(t *testing.T) {
 	}
 	s := writeSyntheticSST(t, 0, 1, entries, crcTab)
 
-	key := "alpha"
-	_, isTombstone, seq, err := s.search(key)
+	result, err := s.search("alpha")
 	if err != nil {
 		t.Fatalf("search(\"alpha\"): %v", err)
 	}
-	if !isTombstone {
-		t.Error("isTombstone = false, want true")
+	if !result.tombstone {
+		t.Error("tombstone = false, want true")
 	}
-	if seq != 5 {
-		t.Errorf("seq = %d, want 5", seq)
+	if result.seq != 5 {
+		t.Errorf("seq = %d, want 5", result.seq)
 	}
 }
 
@@ -474,8 +468,7 @@ func TestSst_Search_NotFound(t *testing.T) {
 
 	// "aqua" is within the index range (> "" and <= "beta")
 	// but does not exist as an entry in the data block.
-	key := "aqua"
-	_, _, _, err := s.search(key)
+	_, err := s.search("aqua")
 	if err != ErrKeyNotFound {
 		t.Errorf("search(\"aqua\"): err = %v, want ErrKeyNotFound", err)
 	}
@@ -508,8 +501,7 @@ func TestSst_Search_BadChecksum(t *testing.T) {
 	}
 	f.Close()
 
-	key := "hello"
-	_, _, _, err = s.search(key)
+	_, err = s.search("hello")
 	if err != ErrBadData {
 		t.Errorf("search after corruption: err = %v, want ErrBadData", err)
 	}
@@ -601,8 +593,7 @@ func TestSstables_Get_FromLevel0(t *testing.T) {
 	s := writeSyntheticSST(t, 0, 1, entries, crcTab)
 
 	ss := &sstables{
-		levels:   1,
-		sstList:  [][]*sst{{s}},
+		levels:   []*level{{sstList: []*sst{s}}},
 		crcTable: crcTab,
 	}
 
@@ -626,8 +617,7 @@ func TestSstables_Get_NotFound(t *testing.T) {
 	s := writeSyntheticSST(t, 0, 1, entries, crcTab)
 
 	ss := &sstables{
-		levels:   1,
-		sstList:  [][]*sst{{s}},
+		levels:   []*level{{sstList: []*sst{s}}},
 		crcTable: crcTab,
 	}
 
@@ -655,8 +645,10 @@ func TestSstables_Get_TombstoneLevel0(t *testing.T) {
 	sL0 := writeSyntheticSST(t, 0, 2, entriesL0, crcTab)
 
 	ss := &sstables{
-		levels:   2,
-		sstList:  [][]*sst{{sL0}, {sL1}},
+		levels: []*level{
+			{sstList: []*sst{sL0}}, // level 0
+			{sstList: []*sst{sL1}}, // level 1
+		},
 		crcTable: crcTab,
 	}
 
@@ -683,8 +675,7 @@ func TestSstables_Get_Level0SeqPrecedence(t *testing.T) {
 	sNew := writeSyntheticSST(t, 0, 2, entriesNew, crcTab)
 
 	ss := &sstables{
-		levels:   1,
-		sstList:  [][]*sst{{sOld, sNew}},
+		levels:   []*level{{sstList: []*sst{sOld, sNew}}},
 		crcTable: crcTab,
 	}
 

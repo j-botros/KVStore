@@ -145,3 +145,39 @@ func (e *StorageEngine) Flush() error {
 
 	return nil
 }
+
+func (e *StorageEngine) Compact(lvlIdx int) error {
+	if lvlIdx >= len(e.sstables.levels) {
+		return ErrLvlNotFound
+	}
+
+	// TODO: Compaction process
+	curLvl := e.sstables.levels[lvlIdx]
+
+	if lvlIdx+1 < len(e.sstables.levels) {
+		nextLvl := e.sstables.levels[lvlIdx+1]
+
+		cur := 0
+		next := 0
+
+		curSst := curLvl.sstList[cur]
+		nextSst := nextLvl.sstList[next]
+
+		newSst := newSst(e.nextFileNumber, lvlIdx+1, e.crcTable)
+		e.nextFileNumber++
+
+		for cur < len(curLvl.sstList) && next < len(nextLvl.sstList) {
+			if curSst.startKey <= nextSst.startKey || curSst.endKey >= nextSst.endKey {
+				newSst.compact(curSst, nextSst)
+				nextLvl.insertSorted(newSst)
+
+				// TODO: Check if curSst and nextSst are fully compacted
+
+			}
+		}
+	} else {
+
+	}
+
+	return nil
+}
