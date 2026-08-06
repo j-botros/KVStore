@@ -688,3 +688,204 @@ func TestSstables_Get_Level0SeqPrecedence(t *testing.T) {
 		t.Errorf("get(\"key\") = %q, want %q (higher seq should win)", val, "new")
 	}
 }
+
+/* ====================================================================================
+	COMPACTION TESTS
+==================================================================================== */
+
+func TestCompact_NoOverlap(t *testing.T) {
+	setupTestDir(t)
+	crcTab := crc32.MakeTable(crc32.Castagnoli)
+
+	// Source SST (Level 0)
+	srcEntries := []testEntry{
+		{key: "a", value: []byte("1"), seq: 1},
+		{key: "b", value: []byte("2"), seq: 2},
+		{key: "c", value: []byte("3"), seq: 3},
+	}
+	srcSst := writeSyntheticSST(t, 0, 100, srcEntries, crcTab)
+
+	// Compaction source with no overlapping SSTs
+	src, err := newCompactionSrc(srcSst, []*sst{}, crcTab)
+	if err != nil {
+		t.Fatalf("newCompactionSrc: %v", err)
+	}
+	defer src.close()
+
+	// Target SST
+	newSst := newSst(200, 1, crcTab)
+	// Unlimited capacity
+	newSst.capacity = 0
+
+	err = newSst.compact(src, false)
+	if err != ErrCompactionDone {
+		t.Fatalf("compact returned %v, want ErrCompactionDone", err)
+	}
+
+	// Verify new SST contents
+	for _, e := range srcEntries {
+		res, err := newSst.search(e.key)
+		if err != nil {
+			t.Errorf("search(%q): %v", e.key, err)
+		} else if string(res.value) != string(e.value) {
+			t.Errorf("search(%q) = %q, want %q", e.key, res.value, e.value)
+		}
+	}
+}
+
+func TestCompact_WithOverlap_UpdateAndNewKeys(t *testing.T) {
+	setupTestDir(t)
+	crcTab := crc32.MakeTable(crc32.Castagnoli)
+
+	// Source SST (Level 0)
+	srcEntries := []testEntry{
+		{key: "apple", value: []byte("red-new"), seq: 5},
+		{key: "banana", value: []byte("yellow"), seq: 4},
+		{key: "cherry", value: []byte("dark-new"), seq: 6},
+	}
+	srcSst := writeSyntheticSST(t, 0, 100, srcEntries, crcTab)
+
+	// Overlapping SST (Level 1)
+	overlapEntries := []testEntry{
+		{key: "apple", value: []byte("red-old"), seq: 1},
+		{key: "cherry", value: []byte("dark-old"), seq: 2},
+		{key: "date", value: []byte("brown"), seq: 3},
+	}
+	overlapSst := writeSyntheticSST(t, 1, 101, overlapEntries, crcTab)
+
+	src, err := newCompactionSrc(srcSst, []*sst{overlapSst}, crcTab)
+	if err != nil {
+		t.Fatalf("newCompactionSrc: %v", err)
+	}
+	defer src.close()
+
+	newSst := newSst(200, 1, crcTab)
+	newSst.capacity = 0
+
+	err = newSst.compact(src, false)
+	if err != ErrCompactionDone {
+		t.Fatalf("compact returned %v, want ErrCompactionDone", err)
+	}
+
+	expected := map[string]string{
+		"apple":  "red-new",  // updated from L0
+		"banana": "yellow",   // new from L0
+		"cherry": "dark-new", // updated from L0
+		"date":   "brown",    // kept from L1
+	}
+
+	for k, want := range expected {
+		res, err := newSst.search(k)
+		if err != nil {
+			t.Errorf("search(%q): %v", k, err)
+		} else if string(res.value) != want {
+			t.Errorf("search(%q) = %q, want %q", k, res.value, want)
+		}
+	}
+}
+
+func TestCompact_CapacitySplit(t *testing.T) {
+	setupTestDir(t)
+	crcTab := crc32.MakeTable(crc32.Castagnoli)
+
+	srcEntries := []testEntry{
+		{key: "k1", value: []byte("v1"), seq: 1},
+		{key: "k2", value: []byte("v2"), seq: 2},
+		{key: "k3", value: []byte("v3"), seq: 3},
+		{key: "k4", value: []byte("v4"), seq: 4},
+		{key: "k5", value: []byte("v5"), seq: 5},
+	}
+	srcSst := writeSyntheticSST(t, 0, 100, srcEntries, crcTab)
+
+	src, err := newCompactionSrc(srcSst, []*sst{}, crcTab)
+	if err != nil {
+		t.Fatalf("newCompactionSrc: %v", err)
+	}
+	defer src.close()
+
+	// Determine exactly how many bytes 2 entries take up
+	cw, _ := newCompactionWriter(newSst(999, 1, crcTab))
+	cw.writeEntry(&entry{key: "k1", value: []byte("v1"), seq: 1})
+	cw.writeEntry(&entry{key: "k2", value: []byte("v2"), seq: 2})
+	twoEntrySize := uint64(cw.currentBlockBuf.Len())
+	cw.outFile.Close()
+	os.Remove(cw.filename)
+
+	// SST 1: Should fill up after 2 entries
+	sst1 := newSst(200, 1, crcTab)
+	sst1.capacity = twoEntrySize
+
+	err = sst1.compact(src, false)
+	if err != ErrCompactionFull {
+		t.Fatalf("sst1.compact returned %v, want ErrCompactionFull", err)
+	}
+
+	// SST 2: Should pick up the remaining 3 entries
+	sst2 := newSst(201, 1, crcTab)
+	sst2.capacity = 0 // unlimited
+
+	err = sst2.compact(src, false)
+	if err != ErrCompactionDone {
+		t.Fatalf("sst2.compact returned %v, want ErrCompactionDone", err)
+	}
+
+	// Verify splitting
+	if _, err := sst1.search("k2"); err != nil {
+		t.Errorf("sst1 missing k2: %v", err)
+	}
+	if _, err := sst1.search("k3"); err != ErrKeyNotFound {
+		t.Errorf("sst1 shouldn't have k3")
+	}
+
+	if _, err := sst2.search("k3"); err != nil {
+		t.Errorf("sst2 missing k3: %v", err)
+	}
+	if _, err := sst2.search("k2"); err != ErrKeyNotFound {
+		t.Errorf("sst2 shouldn't have k2")
+	}
+}
+
+func TestCompact_TombstonePruning(t *testing.T) {
+	setupTestDir(t)
+	crcTab := crc32.MakeTable(crc32.Castagnoli)
+
+	// tombstone for "deleted", normal entry for "kept"
+	srcEntries := []testEntry{
+		{key: "deleted", value: []byte{}, seq: 5, tombstone: true},
+		{key: "kept", value: []byte("data"), seq: 6},
+	}
+	srcSst := writeSyntheticSST(t, 0, 100, srcEntries, crcTab)
+
+	// L1 also has an older version of "deleted"
+	overlapEntries := []testEntry{
+		{key: "deleted", value: []byte("old-data"), seq: 1},
+	}
+	overlapSst := writeSyntheticSST(t, 1, 101, overlapEntries, crcTab)
+
+	src, err := newCompactionSrc(srcSst, []*sst{overlapSst}, crcTab)
+	if err != nil {
+		t.Fatalf("newCompactionSrc: %v", err)
+	}
+	defer src.close()
+
+	newSst := newSst(200, 1, crcTab)
+	newSst.capacity = 0
+
+	// isLastLevel = true
+	err = newSst.compact(src, true)
+	if err != ErrCompactionDone {
+		t.Fatalf("compact returned %v, want ErrCompactionDone", err)
+	}
+
+	// "deleted" should be entirely pruned because isLastLevel=true and it shadowed the L1 entry
+	if _, err := newSst.search("deleted"); err != ErrKeyNotFound {
+		t.Errorf("expected 'deleted' to be pruned (ErrKeyNotFound), got %v", err)
+	}
+
+	res, err := newSst.search("kept")
+	if err != nil {
+		t.Errorf("expected 'kept' to be present, got %v", err)
+	} else if string(res.value) != "data" {
+		t.Errorf("search('kept') = %q, want 'data'", res.value)
+	}
+}

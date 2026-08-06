@@ -126,7 +126,7 @@ func (sstables *sstables) flush(filenum uint64, memtable *memtable) error {
 
 	l0 := sstables.levels[0]
 	l0.sstList = append(l0.sstList, newSst)
-	l0.sizeBytes += memtable.sizeBytes
+	l0.sizeBytes += newSst.sizeBytes
 	return nil
 }
 
@@ -736,8 +736,6 @@ func (newSst *sst) compact(src *compactionSrc, isLastLevel bool) error {
 		cw.writeEntry(src.pending)
 	}
 }
-
-
 
 type block struct {
 	lastKey      string
