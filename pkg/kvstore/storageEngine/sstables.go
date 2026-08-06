@@ -136,11 +136,13 @@ func (sstables *sstables) flush(filenum uint64, memtable *memtable) error {
 
 type sst struct {
 	// SST file data
-	filenum  uint64
-	level    int
-	lastSeq  uint64
-	startKey string
-	endKey   string
+	filenum   uint64
+	level     int
+	lastSeq   uint64
+	startKey  string
+	endKey    string
+	capacity  uint64
+	sizeBytes uint64
 
 	// Index
 	index *index
@@ -365,85 +367,377 @@ func (sst *sst) search(key string) (e *entry, err error) {
 	return nil, ErrKeyNotFound
 }
 
-func (newSst *sst) compact(curSst *sst, nextSst *sst) error {
-	// Create newSst file
-	filename := fmt.Sprintf("data/sstables/level-%d/%d.sst", newSst.level, newSst.filenum)
+/* ====================================================================================
+	COMPACTION WRITER
+==================================================================================== */
 
-	dir := filepath.Dir(filename)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return err
+// compactionWriter holds all mutable state for writing a single output SST during
+// compaction. Its methods are compiled once (not re-created as closures per call).
+type compactionWriter struct {
+	sst      *sst
+	outFile  *os.File
+	filename string
+
+	fileBuffer         *bytes.Buffer
+	currentBlockBuf    *bytes.Buffer
+	currentBlockOffset uint64
+	prevBlockKey       string
+
+	idx      index
+	bf       *bloomFilter
+	startKey string
+	endKey   string
+	lastSeq  uint64
+	numKeys  uint64
+}
+
+func newCompactionWriter(s *sst) (*compactionWriter, error) {
+	filename := fmt.Sprintf("data/sstables/level-%d/%d.sst", s.level, s.filenum)
+	if err := os.MkdirAll(filepath.Dir(filename), 0755); err != nil {
+		return nil, err
 	}
 
-	newFile, err := os.OpenFile(
-		filename,
-		os.O_APPEND|os.O_CREATE|os.O_WRONLY,
-		0644,
-	)
+	f, err := os.OpenFile(filename, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	if err != nil {
+		return nil, err
+	}
+
+	return &compactionWriter{
+		sst:             s,
+		outFile:         f,
+		filename:        filename,
+		fileBuffer:      new(bytes.Buffer),
+		currentBlockBuf: new(bytes.Buffer),
+		idx:             make(index, 0),
+		bf:              newBloomFilter(0),
+	}, nil
+}
+
+func (cw *compactionWriter) flushBlock() {
+	cw.fileBuffer.Write(cw.currentBlockBuf.Bytes())
+	cw.idx = append(cw.idx, newBlock(
+		cw.endKey,
+		cw.currentBlockOffset,
+		uint64(cw.currentBlockBuf.Len()),
+		cw.prevBlockKey,
+	))
+	cw.prevBlockKey = cw.endKey
+	cw.currentBlockOffset += uint64(cw.currentBlockBuf.Len())
+	cw.currentBlockBuf = new(bytes.Buffer)
+}
+
+func (cw *compactionWriter) writeEntry(e *entry) {
+	cw.bf.setBloomBits(e.key)
+
+	entryBuf := new(bytes.Buffer)
+	binary.Write(entryBuf, binary.LittleEndian, e.seq)
+	if e.tombstone {
+		entryBuf.WriteByte(1)
+	} else {
+		entryBuf.WriteByte(0)
+	}
+	keyBytes := []byte(e.key)
+	binary.Write(entryBuf, binary.LittleEndian, uint32(len(keyBytes)))
+	entryBuf.Write(keyBytes)
+	binary.Write(entryBuf, binary.LittleEndian, uint32(len(e.value)))
+	entryBuf.Write(e.value)
+	checksum := crc32.Checksum(entryBuf.Bytes(), cw.sst.crcTable)
+	binary.Write(entryBuf, binary.LittleEndian, checksum)
+
+	cw.currentBlockBuf.Write(entryBuf.Bytes())
+
+	if cw.numKeys == 0 {
+		cw.startKey = e.key
+	}
+	cw.endKey = e.key
+	cw.lastSeq = e.seq
+	cw.numKeys++
+
+	if cw.currentBlockBuf.Len() >= TARGET_BLOCK_SIZE {
+		cw.flushBlock()
+	}
+}
+
+func (cw *compactionWriter) finalize() error {
+	if cw.currentBlockBuf.Len() > 0 {
+		cw.flushBlock()
+	}
+
+	// Update sst metadata
+	cw.sst.bloomFilter = cw.bf
+	cw.sst.index = &cw.idx
+	cw.sst.startKey = cw.startKey
+	cw.sst.endKey = cw.endKey
+	cw.sst.lastSeq = cw.lastSeq
+	cw.sst.sizeBytes = uint64(cw.fileBuffer.Len()) // data bytes before index/bloom/footer
+
+	// Index section: keyLen(4) key offset(8) length(8) per block
+	indexOffset := uint64(cw.fileBuffer.Len())
+	for _, block := range cw.idx {
+		keyBytes := []byte(block.lastKey)
+		binary.Write(cw.fileBuffer, binary.LittleEndian, uint32(len(keyBytes)))
+		cw.fileBuffer.Write(keyBytes)
+		binary.Write(cw.fileBuffer, binary.LittleEndian, block.offset)
+		binary.Write(cw.fileBuffer, binary.LittleEndian, block.length)
+	}
+	indexLength := uint64(cw.fileBuffer.Len()) - indexOffset
+
+	// Bloom filter section
+	bloomOffset := uint64(cw.fileBuffer.Len())
+	cw.fileBuffer.Write(cw.bf.bitstring)
+	bloomLength := uint64(cw.fileBuffer.Len()) - bloomOffset
+
+	// Footer: indexOffset(8) indexLength(8) bloomOffset(8) bloomLength(8) magic(8)
+	binary.Write(cw.fileBuffer, binary.LittleEndian, indexOffset)
+	binary.Write(cw.fileBuffer, binary.LittleEndian, indexLength)
+	binary.Write(cw.fileBuffer, binary.LittleEndian, bloomOffset)
+	binary.Write(cw.fileBuffer, binary.LittleEndian, bloomLength)
+	binary.Write(cw.fileBuffer, binary.LittleEndian, uint64(FOOTER_MAGIC))
+
+	if _, err := cw.outFile.Write(cw.fileBuffer.Bytes()); err != nil {
+		return err
+	}
+	if err := cw.outFile.Sync(); err != nil {
+		return err
+	}
+	return cw.outFile.Close()
+}
+
+func (cw *compactionWriter) abort() {
+	cw.outFile.Close()
+	os.Remove(cw.filename)
+}
+
+/* ====================================================================================
+	COMPACTION SOURCE
+==================================================================================== */
+
+// compactionSrc implements a 2-pointer merge between:
+//   - Stream A: the single source SST from the level being compacted
+//   - Stream B: the ordered list of overlapping SSTs from the next level
+//
+// Because SSTs within the same level never overlap, at most one entry from each
+// stream can be the current minimum — no k-way scan is needed.
+type compactionSrc struct {
+	// Stream A: source SST from lvlIdx
+	srcFile *os.File
+	srcRdr  *io.SectionReader
+	srcHead *entry // nil = Stream A exhausted
+
+	// Stream B: overlapping SSTs from lvlIdx+1 (sorted by startKey)
+	overlapping []*sst
+	overlapIdx  int
+	overlapFile *os.File
+	overlapRdr  *io.SectionReader
+	overlapHead *entry // nil = current overlap SST exhausted
+
+	pending  *entry // result of the most recent advance() call
+	crcTable *crc32.Table
+}
+
+func newCompactionSrc(srcSst *sst, overlapping []*sst, crcTable *crc32.Table) (*compactionSrc, error) {
+	src := &compactionSrc{
+		overlapping: overlapping,
+		crcTable:    crcTable,
+	}
+
+	// Open Stream A
+	srcFilename := fmt.Sprintf("data/sstables/level-%d/%d.sst", srcSst.level, srcSst.filenum)
+	f, err := os.Open(srcFilename)
+	if err != nil {
+		return nil, err
+	}
+	src.srcFile = f
+	lastBlk := (*srcSst.index)[len(*srcSst.index)-1]
+	src.srcRdr = io.NewSectionReader(f, 0, int64(lastBlk.offset+lastBlk.length))
+	src.srcHead, err = readEntry(src.srcRdr, crcTable)
+	if err == ErrEntryNotFound {
+		src.srcHead = nil
+	} else if err != nil {
+		src.srcFile.Close()
+		return nil, err
+	}
+
+	// Open Stream B (first overlapping SST, if any)
+	if len(overlapping) > 0 {
+		if err := src.openOverlap(0); err != nil {
+			src.srcFile.Close()
+			return nil, err
+		}
+	}
+
+	return src, nil
+}
+
+// openOverlap opens the overlapping SST at index i and pre-fetches its first entry.
+func (src *compactionSrc) openOverlap(i int) error {
+	if src.overlapFile != nil {
+		src.overlapFile.Close()
+		src.overlapFile = nil
+	}
+
+	s := src.overlapping[i]
+	filename := fmt.Sprintf("data/sstables/level-%d/%d.sst", s.level, s.filenum)
+	f, err := os.Open(filename)
 	if err != nil {
 		return err
 	}
-	defer newFile.Close()
+	src.overlapFile = f
+	src.overlapIdx = i
 
-	// Open curSst file
-	filename = fmt.Sprintf("data/sstables/level-%d/%d.sst", curSst.level, curSst.filenum)
+	lastBlk := (*s.index)[len(*s.index)-1]
+	src.overlapRdr = io.NewSectionReader(f, 0, int64(lastBlk.offset+lastBlk.length))
 
-	dir = filepath.Dir(filename)
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	e, err := readEntry(src.overlapRdr, src.crcTable)
+	if err == ErrEntryNotFound {
+		src.overlapHead = nil
+	} else if err != nil {
 		return err
+	} else {
+		src.overlapHead = e
+	}
+	return nil
+}
+
+// nextOverlapEntry reads the next entry from the current overlap SST.
+// When it is exhausted, it transparently advances to the next overlap SST.
+// Returns nil when all overlap SSTs are exhausted.
+func (src *compactionSrc) nextOverlapEntry() *entry {
+	e, err := readEntry(src.overlapRdr, src.crcTable)
+	if err == nil {
+		return e
+	}
+	// Current overlap SST exhausted — open the next one
+	for next := src.overlapIdx + 1; next < len(src.overlapping); next++ {
+		if err := src.openOverlap(next); err != nil {
+			return nil
+		}
+		// openOverlap already set overlapHead to the first entry.
+		// Return that entry and load the following one into overlapHead.
+		if src.overlapHead != nil {
+			first := src.overlapHead
+			next, err := readEntry(src.overlapRdr, src.crcTable)
+			if err != nil {
+				src.overlapHead = nil
+			} else {
+				src.overlapHead = next
+			}
+			return first
+		}
+	}
+	return nil
+}
+
+// advance selects the next entry to write via 2-pointer comparison.
+// Sets src.pending and returns ErrCompactionDone when both streams are exhausted.
+func (src *compactionSrc) advance() error {
+	a := src.srcHead
+	b := src.overlapHead
+
+	if a == nil && b == nil {
+		src.pending = nil
+		return ErrCompactionDone
 	}
 
-	curFile, err := os.Open(filename)
-	if err != nil {
-		return err
+	if b == nil || (a != nil && a.key < b.key) {
+		// Stream A wins
+		src.pending = a
+		e, err := readEntry(src.srcRdr, src.crcTable)
+		if err != nil {
+			src.srcHead = nil
+		} else {
+			src.srcHead = e
+		}
+	} else if a == nil || b.key < a.key {
+		// Stream B wins
+		src.pending = b
+		src.overlapHead = src.nextOverlapEntry()
+	} else {
+		// Key tie: keep higher seq, discard the other
+		if a.seq >= b.seq {
+			src.pending = a
+			// Advance Stream A
+			e, err := readEntry(src.srcRdr, src.crcTable)
+			if err != nil {
+				src.srcHead = nil
+			} else {
+				src.srcHead = e
+			}
+			// Discard Stream B's duplicate
+			src.overlapHead = src.nextOverlapEntry()
+		} else {
+			src.pending = b
+			// Advance Stream B
+			src.overlapHead = src.nextOverlapEntry()
+			// Discard Stream A's duplicate
+			e, err := readEntry(src.srcRdr, src.crcTable)
+			if err != nil {
+				src.srcHead = nil
+			} else {
+				src.srcHead = e
+			}
+		}
 	}
-	defer curFile.Close()
 
-	lastBlock := (*curSst.index)[len(*curSst.index)-1]
-	contentSize := int64(lastBlock.offset + lastBlock.length)
-	curRdr := io.NewSectionReader(curFile, 0, contentSize)
+	return nil
+}
 
-	// Open nextSst file
-	filename = fmt.Sprintf("data/sstables/level-%d/%d.sst", nextSst.level, nextSst.filenum)
-
-	dir = filepath.Dir(filename)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return err
+func (src *compactionSrc) close() {
+	if src.srcFile != nil {
+		src.srcFile.Close()
 	}
-
-	nextFile, err := os.Open(filename)
-	if err != nil {
-		return err
+	if src.overlapFile != nil {
+		src.overlapFile.Close()
 	}
-	defer nextFile.Close()
+}
 
-	lastBlock = (*nextSst.index)[len(*nextSst.index)-1]
-	contentSize = int64(lastBlock.offset + lastBlock.length)
-	nextRdr := io.NewSectionReader(nextFile, 0, contentSize)
-
-	// Read each entry in alphabetical order
-	curEntry, err := readEntry(curRdr, newSst.crcTable)
-	if err != nil {
-		return err
-	}
-
-	nextEntry, err := readEntry(nextRdr, newSst.crcTable)
+// compact merges Stream A (srcSst) and Stream B (overlapping SSTs) into newSst.
+// isLastLevel controls tombstone pruning: tombstones are dropped at the last level
+// since there are no deeper levels to shadow.
+//
+// Returns:
+//   - ErrCompactionDone  — all source entries written; newSst is finalized on disk.
+//   - ErrCompactionFull  — newSst reached capacity; finalized on disk, sources remain.
+//   - other error        — I/O or data error; partially-written file is removed.
+func (newSst *sst) compact(src *compactionSrc, isLastLevel bool) error {
+	cw, err := newCompactionWriter(newSst)
 	if err != nil {
 		return err
 	}
 
 	for {
-		if curEntry.key == nextEntry.key {
-			// TODO: Write entry with higher seq
-
-		} else if curEntry.key < nextEntry.key {
-			// TODO: Write curEntry
-
-		} else {
-			// TODO: Write nextEntry
-
+		// Check capacity before writing the next entry
+		written := uint64(cw.fileBuffer.Len()) + uint64(cw.currentBlockBuf.Len())
+		if newSst.capacity > 0 && written >= newSst.capacity {
+			if err := cw.finalize(); err != nil {
+				cw.abort()
+				return err
+			}
+			return ErrCompactionFull
 		}
+
+		if err := src.advance(); err == ErrCompactionDone {
+			if err2 := cw.finalize(); err2 != nil {
+				cw.abort()
+				return err2
+			}
+			return ErrCompactionDone
+		} else if err != nil {
+			cw.abort()
+			return err
+		}
+
+		// Tombstone pruning: at the last level there are no deeper levels to
+		// shadow, so a tombstone entry serves no purpose and can be dropped.
+		if isLastLevel && src.pending.tombstone {
+			continue
+		}
+
+		cw.writeEntry(src.pending)
 	}
 }
+
+
 
 type block struct {
 	lastKey      string

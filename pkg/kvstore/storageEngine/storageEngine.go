@@ -10,6 +10,7 @@ import (
 
 type StorageEngine struct {
 	memCapacity uint64
+	sstCapacity uint64 // fixed max data bytes per output SST
 	crcTable    *crc32.Table
 
 	nextFileNumber uint64
@@ -146,38 +147,77 @@ func (e *StorageEngine) Flush() error {
 	return nil
 }
 
-func (e *StorageEngine) Compact(lvlIdx int) error {
+func (e *StorageEngine) Compact(srcSst *sst) error {
+	lvlIdx := srcSst.level
+
 	if lvlIdx >= len(e.sstables.levels) {
 		return ErrLvlNotFound
 	}
 
-	// TODO: Compaction process
-	curLvl := e.sstables.levels[lvlIdx]
+	// Create next level if it doesn't exist yet
+	if lvlIdx+1 >= len(e.sstables.levels) {
+		curCapacity := e.sstables.levels[lvlIdx].capacityBytes
+		nextCapacity := curCapacity * uint64(e.sstables.growthFactor)
+		e.sstables.levels = append(e.sstables.levels, newLevel(nextCapacity))
+	}
+	nextLvl := e.sstables.levels[lvlIdx+1]
+	isLastLevel := lvlIdx+1 == len(e.sstables.levels)-1
 
-	if lvlIdx+1 < len(e.sstables.levels) {
-		nextLvl := e.sstables.levels[lvlIdx+1]
+	// Find all SSTs in nextLvl whose key range overlaps with srcSst
+	overlapping := make([]*sst, 0)
+	for _, s := range nextLvl.sstList {
+		if s.startKey <= srcSst.endKey && s.endKey >= srcSst.startKey {
+			overlapping = append(overlapping, s)
+		}
+	}
 
-		cur := 0
-		next := 0
+	src, err := newCompactionSrc(srcSst, overlapping, e.crcTable)
+	if err != nil {
+		return err
+	}
+	defer src.close()
 
-		curSst := curLvl.sstList[cur]
-		nextSst := nextLvl.sstList[next]
-
-		newSst := newSst(e.nextFileNumber, lvlIdx+1, e.crcTable)
+	// Loop: produce output SSTs until all source entries are consumed
+	for {
+		out := newSst(e.nextFileNumber, lvlIdx+1, e.crcTable)
+		out.capacity = e.sstCapacity
 		e.nextFileNumber++
 
-		for cur < len(curLvl.sstList) && next < len(nextLvl.sstList) {
-			if curSst.startKey <= nextSst.startKey || curSst.endKey >= nextSst.endKey {
-				newSst.compact(curSst, nextSst)
-				nextLvl.insertSorted(newSst)
+		err := out.compact(src, isLastLevel)
+		if err == ErrCompactionDone {
+			nextLvl.insertSorted(out)
+			nextLvl.sizeBytes += out.sizeBytes
+			break
+		} else if err == ErrCompactionFull {
+			nextLvl.insertSorted(out)
+			nextLvl.sizeBytes += out.sizeBytes
+			continue
+		} else {
+			return err
+		}
+	}
 
-				// TODO: Check if curSst and nextSst are fully compacted
+	// Remove srcSst from its level
+	curLvl := e.sstables.levels[lvlIdx]
+	for i, s := range curLvl.sstList {
+		if s == srcSst {
+			curLvl.sstList = append(curLvl.sstList[:i], curLvl.sstList[i+1:]...)
+			curLvl.sizeBytes -= srcSst.sizeBytes
+			break
+		}
+	}
 
+	// Remove all overlapping SSTs from nextLvl
+	for _, s := range overlapping {
+		for i, ns := range nextLvl.sstList {
+			if ns == s {
+				nextLvl.sstList = append(nextLvl.sstList[:i], nextLvl.sstList[i+1:]...)
+				nextLvl.sizeBytes -= s.sizeBytes
+				break
 			}
 		}
-	} else {
-
 	}
 
 	return nil
 }
+
