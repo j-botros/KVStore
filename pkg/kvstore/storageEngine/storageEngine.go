@@ -20,8 +20,8 @@ type StorageEngine struct {
 	immutables []*memlog
 	sstables   *sstables
 
-	mu       sync.RWMutex
-	flushing atomic.Bool
+	mu         sync.RWMutex // guards active, immutables, nextSeq, nextFileNumber
+	compacting atomic.Bool  // serializes Compact; allows concurrent Flush calls
 }
 
 type memlog struct {
@@ -109,12 +109,6 @@ func (e *StorageEngine) Delete(key string) error {
 ==================================================================================== */
 
 func (e *StorageEngine) Flush() error {
-	// Reject concurrent flush attempts immediately
-	if !e.flushing.CompareAndSwap(false, true) {
-		return nil
-	}
-	defer e.flushing.Store(false)
-
 	// Step 1: Rotate active memlog to immutables under write lock
 	e.mu.Lock()
 	ml := e.active
@@ -126,35 +120,54 @@ func (e *StorageEngine) Flush() error {
 	e.nextFileNumber++
 	e.mu.Unlock()
 
-	// Step 2: Flush to SSTable on disk without holding the mutex (allows concurrent reads/writes)
+	// Step 2: Serialize the frozen memtable to disk (no lock held)
 	err := e.sstables.flush(fileNum, ml.memtable)
 	if err != nil {
 		return err
 	}
 
-	// Step 3: Remove flushed memlog from immutables and clean up WAL under write lock
+	// Step 3: Remove the now-flushed memlog from immutables under write lock
 	e.mu.Lock()
 	if len(e.immutables) > 0 {
-		e.immutables[0] = nil // Avoid memory leak
+		e.immutables[0] = nil // prevent memory leak
 		e.immutables = e.immutables[1:]
 	}
 	e.mu.Unlock()
 
-	// Delete WAL file after successful flush
+	// Step 4: Delete the WAL file (no lock needed; file is private to this flush)
 	walFile := fmt.Sprintf("data/wal/%d.log", ml.wal.logNumber)
 	_ = os.Remove(walFile)
+
+	// Step 5: Check if L0 is over capacity and trigger background compaction
+	e.sstables.mu.RLock()
+	shouldCompact := e.sstables.levels[0].sizeBytes >= e.sstables.levels[0].capacityBytes
+	var compactSrc *sst
+	if shouldCompact && len(e.sstables.levels[0].sstList) > 0 {
+		compactSrc = e.sstables.levels[0].sstList[0]
+	}
+	e.sstables.mu.RUnlock()
+
+	if compactSrc != nil {
+		go func() { _ = e.Compact(compactSrc) }()
+	}
 
 	return nil
 }
 
 func (e *StorageEngine) Compact(srcSst *sst) error {
-	lvlIdx := srcSst.level
+	// Serialization guard: only one compaction at a time
+	if !e.compacting.CompareAndSwap(false, true) {
+		return nil
+	}
+	defer e.compacting.Store(false)
 
+	// Step 1: Snapshot metadata under a brief exclusive lock
+	e.sstables.mu.Lock()
+	lvlIdx := srcSst.level
 	if lvlIdx >= len(e.sstables.levels) {
+		e.sstables.mu.Unlock()
 		return ErrLvlNotFound
 	}
-
-	// Create next level if it doesn't exist yet
 	if lvlIdx+1 >= len(e.sstables.levels) {
 		curCapacity := e.sstables.levels[lvlIdx].capacityBytes
 		nextCapacity := curCapacity * uint64(e.sstables.growthFactor)
@@ -162,42 +175,51 @@ func (e *StorageEngine) Compact(srcSst *sst) error {
 	}
 	nextLvl := e.sstables.levels[lvlIdx+1]
 	isLastLevel := lvlIdx+1 == len(e.sstables.levels)-1
-
-	// Find all SSTs in nextLvl whose key range overlaps with srcSst
 	overlapping := make([]*sst, 0)
 	for _, s := range nextLvl.sstList {
 		if s.startKey <= srcSst.endKey && s.endKey >= srcSst.startKey {
 			overlapping = append(overlapping, s)
 		}
 	}
+	e.sstables.mu.Unlock()
 
+	// Step 2: Merge-read phase — heavy I/O, no sstables lock held
 	src, err := newCompactionSrc(srcSst, overlapping, e.crcTable)
 	if err != nil {
 		return err
 	}
 	defer src.close()
 
-	// Loop: produce output SSTs until all source entries are consumed
+	newSsts := make([]*sst, 0)
 	for {
-		out := newSst(e.nextFileNumber, lvlIdx+1, e.crcTable)
-		out.capacity = e.sstCapacity
+		// Brief exclusive lock to claim a file number, then release immediately
+		e.mu.Lock()
+		fileNum := e.nextFileNumber
 		e.nextFileNumber++
+		e.mu.Unlock()
+
+		out := newSst(fileNum, lvlIdx+1, e.crcTable, e.sstCapacity)
 
 		err := out.compact(src, isLastLevel)
 		if err == ErrCompactionDone {
-			nextLvl.insertSorted(out)
-			nextLvl.sizeBytes += out.sizeBytes
+			newSsts = append(newSsts, out)
 			break
 		} else if err == ErrCompactionFull {
-			nextLvl.insertSorted(out)
-			nextLvl.sizeBytes += out.sizeBytes
+			newSsts = append(newSsts, out)
 			continue
 		} else {
 			return err
 		}
 	}
 
-	// Remove srcSst from its level
+	// Step 3: Atomically swap old SSTs out and new SSTs in under a brief exclusive lock
+	e.sstables.mu.Lock()
+
+	for _, out := range newSsts {
+		nextLvl.insertSorted(out)
+		nextLvl.sizeBytes += out.sizeBytes
+	}
+
 	curLvl := e.sstables.levels[lvlIdx]
 	for i, s := range curLvl.sstList {
 		if s == srcSst {
@@ -206,8 +228,6 @@ func (e *StorageEngine) Compact(srcSst *sst) error {
 			break
 		}
 	}
-
-	// Remove all overlapping SSTs from nextLvl
 	for _, s := range overlapping {
 		for i, ns := range nextLvl.sstList {
 			if ns == s {
@@ -218,6 +238,25 @@ func (e *StorageEngine) Compact(srcSst *sst) error {
 		}
 	}
 
+	shouldCompactNext := nextLvl.sizeBytes >= nextLvl.capacityBytes
+	var nextSrc *sst
+	if shouldCompactNext && len(nextLvl.sstList) > 0 {
+		nextSrc = nextLvl.sstList[0]
+	}
+	e.sstables.mu.Unlock()
+
+	// Step 4: Delete old SST files under per-SST exclusive lock
+	allOld := append([]*sst{srcSst}, overlapping...)
+	for _, s := range allOld {
+		s.mu.Lock()
+		os.Remove(fmt.Sprintf("data/sstables/level-%d/%d.sst", s.level, s.filenum))
+		s.mu.Unlock()
+	}
+
+	// Step 5: Cascade compaction to the next level if it's now over capacity
+	if nextSrc != nil {
+		go func() { _ = e.Compact(nextSrc) }()
+	}
+
 	return nil
 }
-

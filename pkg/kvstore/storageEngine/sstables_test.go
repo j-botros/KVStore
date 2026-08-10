@@ -713,7 +713,8 @@ func TestCompact_NoOverlap(t *testing.T) {
 	defer src.close()
 
 	// Target SST
-	newSst := newSst(200, 1, crcTab)
+	capacity := uint64(64000000)
+	newSst := newSst(200, 1, crcTab, capacity)
 	// Unlimited capacity
 	newSst.capacity = 0
 
@@ -759,7 +760,8 @@ func TestCompact_WithOverlap_UpdateAndNewKeys(t *testing.T) {
 	}
 	defer src.close()
 
-	newSst := newSst(200, 1, crcTab)
+	capacity := uint64(64000000)
+	newSst := newSst(200, 1, crcTab, capacity)
 	newSst.capacity = 0
 
 	err = newSst.compact(src, false)
@@ -804,7 +806,8 @@ func TestCompact_CapacitySplit(t *testing.T) {
 	defer src.close()
 
 	// Determine exactly how many bytes 2 entries take up
-	cw, _ := newCompactionWriter(newSst(999, 1, crcTab))
+	capacity := uint64(64000000)
+	cw, _ := newCompactionWriter(newSst(200, 1, crcTab, capacity))
 	cw.writeEntry(&entry{key: "k1", value: []byte("v1"), seq: 1})
 	cw.writeEntry(&entry{key: "k2", value: []byte("v2"), seq: 2})
 	twoEntrySize := uint64(cw.currentBlockBuf.Len())
@@ -812,7 +815,7 @@ func TestCompact_CapacitySplit(t *testing.T) {
 	os.Remove(cw.filename)
 
 	// SST 1: Should fill up after 2 entries
-	sst1 := newSst(200, 1, crcTab)
+	sst1 := newSst(200, 1, crcTab, capacity)
 	sst1.capacity = twoEntrySize
 
 	err = sst1.compact(src, false)
@@ -821,7 +824,7 @@ func TestCompact_CapacitySplit(t *testing.T) {
 	}
 
 	// SST 2: Should pick up the remaining 3 entries
-	sst2 := newSst(201, 1, crcTab)
+	sst2 := newSst(201, 1, crcTab, capacity)
 	sst2.capacity = 0 // unlimited
 
 	err = sst2.compact(src, false)
@@ -868,8 +871,8 @@ func TestCompact_TombstonePruning(t *testing.T) {
 	}
 	defer src.close()
 
-	newSst := newSst(200, 1, crcTab)
-	newSst.capacity = 0
+	capacity := uint64(64000000)
+	newSst := newSst(200, 1, crcTab, capacity)
 
 	// isLastLevel = true
 	err = newSst.compact(src, true)

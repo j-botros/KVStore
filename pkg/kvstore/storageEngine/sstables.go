@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"sync"
 )
 
 /* ====================================================================================
@@ -51,6 +52,7 @@ type sstables struct {
 	l0Capacity   uint64
 	growthFactor int
 	crcTable     *crc32.Table
+	mu           sync.RWMutex
 }
 
 func newSstables(l0Capacity uint64, growthFactor int, crcTable *crc32.Table) *sstables {
@@ -67,24 +69,51 @@ func newSstables(l0Capacity uint64, growthFactor int, crcTable *crc32.Table) *ss
 }
 
 func (sstables *sstables) get(key string) (value []byte, err error) {
-	// Level 0: SSTs may overlap, search all and pick highest seq
+	// Step 1: snapshot candidate SST pointers under a brief read lock.
+	// Holding the lock only for pointer copies, not for any disk I/O.
+	sstables.mu.RLock()
+
+	// Level 0: SSTs may overlap — collect all whose key range covers the target.
+	var l0Candidates []*sst
+	for _, s := range sstables.levels[0].sstList {
+		if key >= s.startKey && key <= s.endKey {
+			l0Candidates = append(l0Candidates, s)
+		}
+	}
+
+	// Level 1+: SSTs are non-overlapping — collect the first match per level.
+	var lvlCandidates []*sst
+	for _, lvl := range sstables.levels[1:] {
+		for _, s := range lvl.sstList {
+			if key >= s.startKey && key <= s.endKey {
+				lvlCandidates = append(lvlCandidates, s)
+				break // non-overlapping: first match is the only match
+			}
+		}
+	}
+
+	sstables.mu.RUnlock()
+
+	// Step 2: read each candidate file individually under its own per-SST lock
+
+	// Level 0: search all candidates and pick the entry with the highest seq.
 	seq := uint64(0)
 	tombstone := false
-	for _, sst := range sstables.levels[0].sstList {
-		if key >= sst.startKey && key <= sst.endKey {
-			entry, err := sst.search(key)
+	for _, s := range l0Candidates {
+		s.mu.RLock()
+		entry, err := s.search(key)
+		s.mu.RUnlock()
 
-			if err == ErrKeyNotFound {
-				continue
-			} else if err != nil {
-				return nil, err
-			}
+		if err == ErrKeyNotFound {
+			continue
+		} else if err != nil {
+			return nil, err
+		}
 
-			if entry.seq >= seq {
-				seq = entry.seq
-				value = entry.value
-				tombstone = entry.tombstone
-			}
+		if entry.seq >= seq {
+			seq = entry.seq
+			value = entry.value
+			tombstone = entry.tombstone
 		}
 	}
 
@@ -94,39 +123,40 @@ func (sstables *sstables) get(key string) (value []byte, err error) {
 		return value, nil
 	}
 
-	// Level 1+: SSTs are non-overlapping; first match wins
-	for _, lvl := range sstables.levels[1:] {
-		for _, sst := range lvl.sstList {
-			if key >= sst.startKey && key <= sst.endKey {
-				entry, err := sst.search(key)
+	// Level 1+: first match wins.
+	for _, c := range lvlCandidates {
+		c.mu.RLock()
+		entry, err := c.search(key)
+		c.mu.RUnlock()
 
-				if err == ErrKeyNotFound {
-					continue
-				} else if err != nil {
-					return nil, err
-				}
-
-				if entry.tombstone {
-					return nil, ErrKeyNotFound
-				}
-
-				return entry.value, nil
-			}
+		if err == ErrKeyNotFound {
+			continue
+		} else if err != nil {
+			return nil, err
 		}
+
+		if entry.tombstone {
+			return nil, ErrKeyNotFound
+		}
+		return entry.value, nil
 	}
 
 	return nil, ErrKeyNotFound
 }
 
 func (sstables *sstables) flush(filenum uint64, memtable *memtable) error {
+	// I/O phase: no lock held — allows concurrent reads and other flushes.
 	newSst, err := newSstFromMemtable(filenum, memtable, sstables.crcTable)
 	if err != nil {
 		return err
 	}
 
+	// List mutation: brief exclusive lock to append the new SST
+	sstables.mu.Lock()
 	l0 := sstables.levels[0]
 	l0.sstList = append(l0.sstList, newSst)
 	l0.sizeBytes += newSst.sizeBytes
+	sstables.mu.Unlock()
 	return nil
 }
 
@@ -152,6 +182,8 @@ type sst struct {
 
 	// Checksum table
 	crcTable *crc32.Table
+
+	mu sync.RWMutex
 }
 
 const (
@@ -164,11 +196,12 @@ const (
 	TARGET_BLOCK_SIZE = 4 * 1024 // 4 KB
 )
 
-func newSst(filenum uint64, lvl int, crcTable *crc32.Table) *sst {
+func newSst(filenum uint64, lvl int, crcTable *crc32.Table, capacity uint64) *sst {
 	sst := &sst{
 		filenum:  filenum,
 		level:    lvl,
 		crcTable: crcTable,
+		capacity: capacity,
 	}
 
 	return sst
@@ -371,8 +404,7 @@ func (sst *sst) search(key string) (e *entry, err error) {
 	COMPACTION WRITER
 ==================================================================================== */
 
-// compactionWriter holds all mutable state for writing a single output SST during
-// compaction. Its methods are compiled once (not re-created as closures per call).
+// compactionWriter holds all mutable state for writing a single output SST during compaction
 type compactionWriter struct {
 	sst      *sst
 	outFile  *os.File
@@ -520,6 +552,7 @@ func (cw *compactionWriter) abort() {
 // stream can be the current minimum — no k-way scan is needed.
 type compactionSrc struct {
 	// Stream A: source SST from lvlIdx
+	srcSst  *sst
 	srcFile *os.File
 	srcRdr  *io.SectionReader
 	srcHead *entry // nil = Stream A exhausted
@@ -537,24 +570,41 @@ type compactionSrc struct {
 
 func newCompactionSrc(srcSst *sst, overlapping []*sst, crcTable *crc32.Table) (*compactionSrc, error) {
 	src := &compactionSrc{
+		srcSst:      srcSst,
 		overlapping: overlapping,
 		crcTable:    crcTable,
+	}
+
+	// Acquire per-SST read locks for all source files
+	srcSst.mu.RLock()
+	for _, s := range overlapping {
+		s.mu.RLock()
 	}
 
 	// Open Stream A
 	srcFilename := fmt.Sprintf("data/sstables/level-%d/%d.sst", srcSst.level, srcSst.filenum)
 	f, err := os.Open(srcFilename)
 	if err != nil {
+		srcSst.mu.RUnlock()
+		for _, s := range overlapping {
+			s.mu.RUnlock()
+		}
 		return nil, err
 	}
+
 	src.srcFile = f
 	lastBlk := (*srcSst.index)[len(*srcSst.index)-1]
 	src.srcRdr = io.NewSectionReader(f, 0, int64(lastBlk.offset+lastBlk.length))
 	src.srcHead, err = readEntry(src.srcRdr, crcTable)
+
 	if err == ErrEntryNotFound {
 		src.srcHead = nil
 	} else if err != nil {
 		src.srcFile.Close()
+		srcSst.mu.RUnlock()
+		for _, s := range overlapping {
+			s.mu.RUnlock()
+		}
 		return nil, err
 	}
 
@@ -562,6 +612,10 @@ func newCompactionSrc(srcSst *sst, overlapping []*sst, crcTable *crc32.Table) (*
 	if len(overlapping) > 0 {
 		if err := src.openOverlap(0); err != nil {
 			src.srcFile.Close()
+			srcSst.mu.RUnlock()
+			for _, s := range overlapping {
+				s.mu.RUnlock()
+			}
 			return nil, err
 		}
 	}
@@ -689,6 +743,12 @@ func (src *compactionSrc) close() {
 	if src.overlapFile != nil {
 		src.overlapFile.Close()
 	}
+	// Release per-SST read locks now that all file I/O is done.
+	// This allows a waiting Compact(delete phase) sst.mu.Lock() to proceed.
+	src.srcSst.mu.RUnlock()
+	for _, s := range src.overlapping {
+		s.mu.RUnlock()
+	}
 }
 
 // compact merges Stream A (srcSst) and Stream B (overlapping SSTs) into newSst.
@@ -708,7 +768,7 @@ func (newSst *sst) compact(src *compactionSrc, isLastLevel bool) error {
 	for {
 		// Check capacity before writing the next entry
 		written := uint64(cw.fileBuffer.Len()) + uint64(cw.currentBlockBuf.Len())
-		if newSst.capacity > 0 && written >= newSst.capacity {
+		if written >= newSst.capacity {
 			if err := cw.finalize(); err != nil {
 				cw.abort()
 				return err

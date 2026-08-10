@@ -305,7 +305,7 @@ func TestStorageEngine_Compact_MultiOutput(t *testing.T) {
 	e := newTestEngine(t)
 
 	// Determine exactly how many bytes 2 entries take up
-	cw, _ := newCompactionWriter(newSst(999, 1, e.crcTable))
+	cw, _ := newCompactionWriter(newSst(999, 1, e.crcTable, e.sstCapacity))
 	cw.writeEntry(&entry{key: "k1", value: []byte("v1"), seq: 1})
 	cw.writeEntry(&entry{key: "k2", value: []byte("v2"), seq: 2})
 	twoEntrySize := uint64(cw.currentBlockBuf.Len())
