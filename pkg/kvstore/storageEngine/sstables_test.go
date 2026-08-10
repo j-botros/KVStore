@@ -712,11 +712,8 @@ func TestCompact_NoOverlap(t *testing.T) {
 	}
 	defer src.close()
 
-	// Target SST
-	capacity := uint64(64000000)
-	newSst := newSst(200, 1, crcTab, capacity)
-	// Unlimited capacity
-	newSst.capacity = 0
+	// Target SST — large capacity so all entries fit
+	newSst := newSst(200, 1, crcTab, defaultSstCapacity)
 
 	err = newSst.compact(src, false)
 	if err != ErrCompactionDone {
@@ -760,9 +757,7 @@ func TestCompact_WithOverlap_UpdateAndNewKeys(t *testing.T) {
 	}
 	defer src.close()
 
-	capacity := uint64(64000000)
-	newSst := newSst(200, 1, crcTab, capacity)
-	newSst.capacity = 0
+	newSst := newSst(200, 1, crcTab, defaultSstCapacity)
 
 	err = newSst.compact(src, false)
 	if err != ErrCompactionDone {
@@ -806,8 +801,7 @@ func TestCompact_CapacitySplit(t *testing.T) {
 	defer src.close()
 
 	// Determine exactly how many bytes 2 entries take up
-	capacity := uint64(64000000)
-	cw, _ := newCompactionWriter(newSst(200, 1, crcTab, capacity))
+	cw, _ := newCompactionWriter(newSst(900, 1, crcTab, defaultSstCapacity))
 	cw.writeEntry(&entry{key: "k1", value: []byte("v1"), seq: 1})
 	cw.writeEntry(&entry{key: "k2", value: []byte("v2"), seq: 2})
 	twoEntrySize := uint64(cw.currentBlockBuf.Len())
@@ -815,8 +809,7 @@ func TestCompact_CapacitySplit(t *testing.T) {
 	os.Remove(cw.filename)
 
 	// SST 1: Should fill up after 2 entries
-	sst1 := newSst(200, 1, crcTab, capacity)
-	sst1.capacity = twoEntrySize
+	sst1 := newSst(200, 1, crcTab, twoEntrySize)
 
 	err = sst1.compact(src, false)
 	if err != ErrCompactionFull {
@@ -824,8 +817,7 @@ func TestCompact_CapacitySplit(t *testing.T) {
 	}
 
 	// SST 2: Should pick up the remaining 3 entries
-	sst2 := newSst(201, 1, crcTab, capacity)
-	sst2.capacity = 0 // unlimited
+	sst2 := newSst(201, 1, crcTab, defaultSstCapacity)
 
 	err = sst2.compact(src, false)
 	if err != ErrCompactionDone {
@@ -871,8 +863,7 @@ func TestCompact_TombstonePruning(t *testing.T) {
 	}
 	defer src.close()
 
-	capacity := uint64(64000000)
-	newSst := newSst(200, 1, crcTab, capacity)
+	newSst := newSst(200, 1, crcTab, defaultSstCapacity)
 
 	// isLastLevel = true
 	err = newSst.compact(src, true)
@@ -890,5 +881,182 @@ func TestCompact_TombstonePruning(t *testing.T) {
 		t.Errorf("expected 'kept' to be present, got %v", err)
 	} else if string(res.value) != "data" {
 		t.Errorf("search('kept') = %q, want 'data'", res.value)
+	}
+}
+
+/* ====================================================================================
+	ADDITIONAL COMPACTION TESTS
+==================================================================================== */
+
+func TestCompactionWriter_Abort_CleansFile(t *testing.T) {
+	setupTestDir(t)
+	crcTab := crc32.MakeTable(crc32.Castagnoli)
+
+	s := newSst(300, 1, crcTab, defaultSstCapacity)
+	cw, err := newCompactionWriter(s)
+	if err != nil {
+		t.Fatalf("newCompactionWriter: %v", err)
+	}
+
+	// Write some data so a file definitely exists
+	cw.writeEntry(&entry{key: "x", value: []byte("y"), seq: 1})
+	filename := cw.filename
+
+	// Verify file exists before abort
+	if _, err := os.Stat(filename); os.IsNotExist(err) {
+		t.Fatal("expected SST file to exist before abort")
+	}
+
+	cw.abort()
+
+	// File should be deleted after abort
+	if _, err := os.Stat(filename); !os.IsNotExist(err) {
+		t.Errorf("expected SST file to be deleted after abort, got err = %v", err)
+	}
+}
+
+func TestCompactionSrc_AdvanceOrder(t *testing.T) {
+	setupTestDir(t)
+	crcTab := crc32.MakeTable(crc32.Castagnoli)
+
+	// Stream A (source SST)
+	srcEntries := []testEntry{
+		{key: "b", value: []byte("B"), seq: 2},
+		{key: "d", value: []byte("D"), seq: 4},
+	}
+	srcSst := writeSyntheticSST(t, 0, 100, srcEntries, crcTab)
+
+	// Stream B (overlapping SST)
+	overlapEntries := []testEntry{
+		{key: "a", value: []byte("A"), seq: 1},
+		{key: "c", value: []byte("C"), seq: 3},
+		{key: "e", value: []byte("E"), seq: 5},
+	}
+	overlapSst := writeSyntheticSST(t, 1, 101, overlapEntries, crcTab)
+
+	src, err := newCompactionSrc(srcSst, []*sst{overlapSst}, crcTab)
+	if err != nil {
+		t.Fatalf("newCompactionSrc: %v", err)
+	}
+	defer src.close()
+
+	// Collect all entries via advance()
+	var keys []string
+	for {
+		err := src.advance()
+		if err == ErrCompactionDone {
+			break
+		}
+		if err != nil {
+			t.Fatalf("advance: %v", err)
+		}
+		keys = append(keys, src.pending.key)
+	}
+
+	// Entries must be in sorted key order
+	expectedOrder := []string{"a", "b", "c", "d", "e"}
+	if len(keys) != len(expectedOrder) {
+		t.Fatalf("advance produced %d entries, want %d", len(keys), len(expectedOrder))
+	}
+	for i, k := range keys {
+		if k != expectedOrder[i] {
+			t.Errorf("advance[%d] = %q, want %q", i, k, expectedOrder[i])
+		}
+	}
+}
+
+func TestSstables_Flush_AddsToL0(t *testing.T) {
+	setupTestDir(t)
+	crcTab := crc32.MakeTable(crc32.Castagnoli)
+
+	ss := newSstables(4096, 10, crcTab)
+
+	entries := []testEntry{
+		{key: "foo", value: []byte("bar"), seq: 2},
+		{key: "hello", value: []byte("world"), seq: 1},
+	}
+	m := newTestMemtable(t, entries)
+
+	if err := ss.flush(1, m); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+
+	ss.mu.RLock()
+	l0 := ss.levels[0]
+	ss.mu.RUnlock()
+
+	if len(l0.sstList) != 1 {
+		t.Fatalf("expected 1 SST in L0, got %d", len(l0.sstList))
+	}
+	if l0.sizeBytes == 0 {
+		t.Error("expected L0 sizeBytes > 0")
+	}
+
+	// Verify the SST is searchable
+	val, err := ss.get("hello")
+	if err != nil {
+		t.Fatalf("get('hello'): %v", err)
+	}
+	if string(val) != "world" {
+		t.Errorf("get('hello') = %q, want 'world'", val)
+	}
+}
+
+func TestCompact_OverlapMultipleSSTs(t *testing.T) {
+	setupTestDir(t)
+	crcTab := crc32.MakeTable(crc32.Castagnoli)
+
+	// Source SST (L0) spanning keys a-f
+	srcEntries := []testEntry{
+		{key: "b", value: []byte("B-new"), seq: 10},
+		{key: "e", value: []byte("E-new"), seq: 11},
+	}
+	srcSst := writeSyntheticSST(t, 0, 100, srcEntries, crcTab)
+
+	// Overlapping SST 1 (L1): covers a-c
+	over1Entries := []testEntry{
+		{key: "a", value: []byte("A-old"), seq: 1},
+		{key: "b", value: []byte("B-old"), seq: 2},
+		{key: "c", value: []byte("C-old"), seq: 3},
+	}
+	overSst1 := writeSyntheticSST(t, 1, 101, over1Entries, crcTab)
+
+	// Overlapping SST 2 (L1): covers d-f
+	over2Entries := []testEntry{
+		{key: "d", value: []byte("D-old"), seq: 4},
+		{key: "e", value: []byte("E-old"), seq: 5},
+		{key: "f", value: []byte("F-old"), seq: 6},
+	}
+	overSst2 := writeSyntheticSST(t, 1, 102, over2Entries, crcTab)
+
+	src, err := newCompactionSrc(srcSst, []*sst{overSst1, overSst2}, crcTab)
+	if err != nil {
+		t.Fatalf("newCompactionSrc: %v", err)
+	}
+	defer src.close()
+
+	newSst := newSst(200, 1, crcTab, defaultSstCapacity)
+	err = newSst.compact(src, false)
+	if err != ErrCompactionDone {
+		t.Fatalf("compact returned %v, want ErrCompactionDone", err)
+	}
+
+	// Verify merged results
+	expected := map[string]string{
+		"a": "A-old",
+		"b": "B-new", // updated from L0
+		"c": "C-old",
+		"d": "D-old",
+		"e": "E-new", // updated from L0
+		"f": "F-old",
+	}
+
+	for k, want := range expected {
+		res, err := newSst.search(k)
+		if err != nil {
+			t.Errorf("search(%q): %v", k, err)
+		} else if string(res.value) != want {
+			t.Errorf("search(%q) = %q, want %q", k, res.value, want)
+		}
 	}
 }

@@ -358,6 +358,7 @@ func newSstFromMemtable(filenum uint64, memtable *memtable, crcTable *crc32.Tabl
 	sst.lastSeq = lastSeq
 	sst.startKey = startKey
 	sst.endKey = endKey
+	sst.sizeBytes = indexOffset
 
 	return sst, nil
 }

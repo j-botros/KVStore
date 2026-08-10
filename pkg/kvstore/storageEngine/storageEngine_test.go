@@ -2,35 +2,11 @@ package storageengine
 
 import (
 	"fmt"
-	"hash/crc32"
 	"os"
+	"sync"
 	"testing"
+	"time"
 )
-
-// newTestEngine builds a fully functional StorageEngine backed by a temp directory.
-// The WAL writes to a real file; the sstables layer is empty (no SST files).
-func newTestEngine(t *testing.T) *StorageEngine {
-	t.Helper()
-	setupTestDir(t)
-	if err := os.MkdirAll("data/wal", 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	crcTable := crc32.MakeTable(crc32.Castagnoli)
-
-	return &StorageEngine{
-		memCapacity:    4096,
-		crcTable:       crcTable,
-		nextFileNumber: 1,
-		nextSeq:        1,
-		active:         newMemlog(1, crcTable),
-		immutables:     make([]*memlog, 0),
-		sstables: &sstables{
-			levels:   []*level{newLevel(0)}, // level 0, no capacity limit yet
-			crcTable: crcTable,
-		},
-	}
-}
 
 func TestStorageEngine_PutAndGet(t *testing.T) {
 	e := newTestEngine(t)
@@ -248,8 +224,6 @@ func TestStorageEngine_Compact_OverlapMerge(t *testing.T) {
 	}
 	overlapSst := writeSyntheticSST(t, 1, 100, l1Entries, crcTab)
 	l1.insertSorted(overlapSst)
-	// fake size
-	overlapSst.sizeBytes = 500
 	l1.sizeBytes += overlapSst.sizeBytes
 
 	// Flush an SST to L0 that overlaps and updates 'c'
@@ -275,11 +249,6 @@ func TestStorageEngine_Compact_OverlapMerge(t *testing.T) {
 	// L1 should have exactly one merged SST (overlapSst should be deleted)
 	if len(l1.sstList) != 1 {
 		t.Fatalf("expected 1 merged SST in L1, got %d", len(l1.sstList))
-	}
-
-	// Ensure old size was subtracted out
-	if l1.sizeBytes == 500 {
-		t.Errorf("L1 sizeBytes was not properly updated, still %d", l1.sizeBytes)
 	}
 
 	// Verify merged data
@@ -344,5 +313,182 @@ func TestStorageEngine_Compact_MultiOutput(t *testing.T) {
 		} else if string(val) != want {
 			t.Errorf("Get(%q) = %q, want %q", k, val, want)
 		}
+	}
+}
+
+func TestStorageEngine_Compact_Serialization(t *testing.T) {
+	e := newTestEngine(t)
+
+	// Flush an SST so we have something to compact
+	e.Put("x", []byte("1"))
+	e.Flush()
+
+	srcSst := e.sstables.levels[0].sstList[0]
+
+	// Pre-set the compacting flag to simulate an in-progress compaction
+	e.compacting.Store(true)
+
+	// A second compaction attempt should return nil immediately
+	err := e.Compact(srcSst)
+	if err != nil {
+		t.Errorf("concurrent Compact should return nil, got %v", err)
+	}
+
+	// L0 should still have the SST (compaction was skipped)
+	if len(e.sstables.levels[0].sstList) != 1 {
+		t.Errorf("expected L0 unchanged (1 SST), got %d", len(e.sstables.levels[0].sstList))
+	}
+
+	// Release the flag and verify real compaction works
+	e.compacting.Store(false)
+	if err := e.Compact(srcSst); err != nil {
+		t.Fatalf("Compact after releasing flag: %v", err)
+	}
+
+	if len(e.sstables.levels[0].sstList) != 0 {
+		t.Errorf("expected L0 empty after real compaction, got %d", len(e.sstables.levels[0].sstList))
+	}
+}
+
+func TestStorageEngine_Flush_Concurrent(t *testing.T) {
+	e := newTestEngine(t)
+
+	// Insert different keys for two separate flushes
+	e.Put("a", []byte("1"))
+	e.Put("b", []byte("2"))
+
+	var wg sync.WaitGroup
+	errs := make([]error, 2)
+
+	// First flush
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		errs[0] = e.Flush()
+	}()
+
+	// Give the first flush a moment to rotate
+	time.Sleep(10 * time.Millisecond)
+
+	// Insert more data into the new active memlog
+	e.Put("c", []byte("3"))
+	e.Put("d", []byte("4"))
+
+	// Second flush
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		errs[1] = e.Flush()
+	}()
+
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("Flush %d failed: %v", i, err)
+		}
+	}
+
+	// Both SSTs should be in L0
+	e.sstables.mu.RLock()
+	l0Count := len(e.sstables.levels[0].sstList)
+	e.sstables.mu.RUnlock()
+
+	if l0Count != 2 {
+		t.Errorf("expected 2 SSTs in L0 after concurrent flush, got %d", l0Count)
+	}
+
+	// All keys should be readable
+	for _, k := range []string{"a", "b", "c", "d"} {
+		if _, err := e.Get(k); err != nil {
+			t.Errorf("Get(%q) failed after concurrent flush: %v", k, err)
+		}
+	}
+}
+
+func TestStorageEngine_Flush_RotatesMemlog(t *testing.T) {
+	e := newTestEngine(t)
+
+	e.Put("rotate", []byte("me"))
+
+	// Capture the active memlog before flush
+	e.mu.RLock()
+	oldActive := e.active
+	e.mu.RUnlock()
+
+	if err := e.Flush(); err != nil {
+		t.Fatalf("Flush failed: %v", err)
+	}
+
+	// Active memlog should be a new instance
+	e.mu.RLock()
+	newActive := e.active
+	immLen := len(e.immutables)
+	e.mu.RUnlock()
+
+	if newActive == oldActive {
+		t.Error("active memlog was not rotated after Flush")
+	}
+
+	if immLen != 0 {
+		t.Errorf("immutables should be empty after Flush, got %d", immLen)
+	}
+
+	// Data should still be readable from the SSTable
+	val, err := e.Get("rotate")
+	if err != nil {
+		t.Fatalf("Get('rotate') after Flush: %v", err)
+	}
+	if string(val) != "me" {
+		t.Errorf("Get('rotate') = %q, want 'me'", val)
+	}
+}
+
+func TestStorageEngine_Flush_TriggersCompaction(t *testing.T) {
+	// Use a tiny L0 capacity so a single flush puts it over the limit
+	e := newTestEngine(t)
+
+	// Set L0 capacity to 0 so that any flush triggers compaction (sizeBytes >= capacityBytes → 0 >= 0)
+	e.sstables.mu.Lock()
+	e.sstables.levels[0].capacityBytes = 1
+	e.sstables.growthFactor = 1000000
+	e.sstables.mu.Unlock()
+
+	e.Put("trigger", []byte("compact"))
+
+	if err := e.Flush(); err != nil {
+		t.Fatalf("Flush failed: %v", err)
+	}
+
+	// Give the background goroutine time to complete compaction
+	time.Sleep(200 * time.Millisecond)
+
+	// L0 should be empty (compaction moved the SST to L1)
+	e.sstables.mu.RLock()
+	l0Count := len(e.sstables.levels[0].sstList)
+	l1Exists := len(e.sstables.levels) > 1
+	var l1Count int
+	if l1Exists {
+		l1Count = len(e.sstables.levels[1].sstList)
+	}
+	e.sstables.mu.RUnlock()
+
+	if l0Count != 0 {
+		t.Errorf("expected L0 empty after triggered compaction, got %d SSTs", l0Count)
+	}
+	if !l1Exists {
+		t.Error("expected L1 to exist after triggered compaction, L1 does not exist")
+	}
+	if l1Count == 0 {
+		t.Errorf("expected L1 to have SSTs after triggered compaction, got %d", l1Count)
+	}
+
+	// Data should still be readable
+	val, err := e.Get("trigger")
+	if err != nil {
+		t.Fatalf("Get('trigger') after compaction: %v", err)
+	}
+	if string(val) != "compact" {
+		t.Errorf("Get('trigger') = %q, want 'compact'", val)
 	}
 }

@@ -80,9 +80,12 @@ func writeSyntheticSST(t *testing.T, level int, filenum uint64, entries []testEn
 	binary.Write(indexBuf, binary.LittleEndian, dataBlockLength)
 	indexLength := uint64(indexBuf.Len())
 
-	// ── Bloom filter (pass-through: numHashes defaults to 0) ───
+	// ── Bloom filter ────────────────────────────────────────────
 	bloomOffset := indexOffset + indexLength
 	bf := newBloomFilter(uint64(len(entries)))
+	for _, e := range entries {
+		bf.setBloomBits(e.key)
+	}
 	bloomBuf := bf.bitstring
 	bloomLength := uint64(len(bloomBuf))
 
@@ -125,6 +128,7 @@ func writeSyntheticSST(t *testing.T, level int, filenum uint64, entries []testEn
 		lastSeq:     entries[len(entries)-1].seq,
 		startKey:    entries[0].key,
 		endKey:      entries[len(entries)-1].key,
+		sizeBytes:   dataBlockLength,
 		index:       idx,
 		bloomFilter: bf,
 		crcTable:    crcTab,
@@ -144,4 +148,35 @@ func newTestMemtable(t *testing.T, entries []testEntry) *memtable {
 		}
 	}
 	return m
+}
+
+const defaultSstCapacity = 64 * 1024 * 1024 // 64 MB
+
+// newTestEngine builds a fully functional StorageEngine backed by a temp directory.
+func newTestEngine(t *testing.T) *StorageEngine {
+	t.Helper()
+	return newTestEngineWithCapacity(t, defaultSstCapacity)
+}
+
+// newTestEngineWithCapacity is like newTestEngine but lets callers set a
+// custom sstCapacity for compaction-split tests.
+func newTestEngineWithCapacity(t *testing.T, sstCap uint64) *StorageEngine {
+	t.Helper()
+	setupTestDir(t)
+	if err := os.MkdirAll("data/wal", 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	crcTable := crc32.MakeTable(crc32.Castagnoli)
+
+	return &StorageEngine{
+		memCapacity:    4096,
+		sstCapacity:    sstCap,
+		crcTable:       crcTable,
+		nextFileNumber: 1,
+		nextSeq:        1,
+		active:         newMemlog(1, crcTable),
+		immutables:     make([]*memlog, 0),
+		sstables:       newSstables(4096, 10, crcTable),
+	}
 }

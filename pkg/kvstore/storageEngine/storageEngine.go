@@ -188,7 +188,11 @@ func (e *StorageEngine) Compact(srcSst *sst) error {
 	if err != nil {
 		return err
 	}
-	defer src.close()
+	defer func() {
+		if src != nil {
+			src.close()
+		}
+	}()
 
 	newSsts := make([]*sst, 0)
 	for {
@@ -244,6 +248,10 @@ func (e *StorageEngine) Compact(srcSst *sst) error {
 		nextSrc = nextLvl.sstList[0]
 	}
 	e.sstables.mu.Unlock()
+
+	// Release read locks and files before taking write locks for deletion
+	src.close()
+	src = nil
 
 	// Step 4: Delete old SST files under per-SST exclusive lock
 	allOld := append([]*sst{srcSst}, overlapping...)
