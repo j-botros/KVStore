@@ -492,3 +492,110 @@ func TestStorageEngine_Flush_TriggersCompaction(t *testing.T) {
 		t.Errorf("Get('trigger') = %q, want 'compact'", val)
 	}
 }
+
+/* ====================================================================================
+	AUTO-FLUSH TESTS (flush triggered by Put / Delete filling the memtable)
+==================================================================================== */
+
+// waitForL0Count polls until L0 has at least minCount SSTs or the 2-second deadline
+// is exceeded. Returns true if the condition was met.
+func waitForL0Count(e *StorageEngine, minCount int) bool {
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		e.sstables.mu.RLock()
+		n := len(e.sstables.levels[0].sstList)
+		e.sstables.mu.RUnlock()
+		if n >= minCount {
+			return true
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return false
+}
+
+// TestStorageEngine_Put_TriggersAutoFlush verifies that a Put that pushes the
+// memtable past memCapacity automatically kicks off a background Flush and
+// the data is readable after the SST is written.
+func TestStorageEngine_Put_TriggersAutoFlush(t *testing.T) {
+	// memCapacity = 1 byte: the first Put will always exceed it.
+	e := newTestEngineWithMemCapacity(t, 1)
+
+	if err := e.Put("autoflush", []byte("yes")); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	if !waitForL0Count(e, 1) {
+		t.Fatal("timed out: auto-flush did not produce an SST in L0 within 2s")
+	}
+
+	// Data must still be readable (from the SST, since memtable was rotated)
+	val, err := e.Get("autoflush")
+	if err != nil {
+		t.Fatalf("Get after auto-flush: %v", err)
+	}
+	if string(val) != "yes" {
+		t.Errorf("Get = %q, want %q", val, "yes")
+	}
+}
+
+// TestStorageEngine_Delete_TriggersAutoFlush verifies that a Delete that pushes
+// the memtable past memCapacity automatically kicks off a background Flush.
+// The tombstone ends up in the SST and ErrKeyNotFound is still returned for
+// the deleted key.
+func TestStorageEngine_Delete_TriggersAutoFlush(t *testing.T) {
+	// memCapacity = 1 byte: the first Delete will always exceed it.
+	e := newTestEngineWithMemCapacity(t, 1)
+
+	// Delete a never-inserted key: a tombstone node is created, sizeBytes grows.
+	if err := e.Delete("ghost"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+
+	if !waitForL0Count(e, 1) {
+		t.Fatal("timed out: auto-flush did not produce an SST in L0 within 2s")
+	}
+
+	// The tombstone should still return ErrKeyNotFound
+	_, err := e.Get("ghost")
+	if err != ErrKeyNotFound {
+		t.Errorf("Get deleted key: err = %v, want ErrKeyNotFound", err)
+	}
+}
+
+// TestStorageEngine_AutoFlush_MultipleEntries verifies that when the memtable
+// fills up after several writes (not just the first), the flush still fires.
+func TestStorageEngine_AutoFlush_MultipleEntries(t *testing.T) {
+	// Each entry for "kN"/"vN" is ENTRY_OVERHEAD_BYTES(21) + 2 + 2 = 25 bytes.
+	// Set capacity to 60 bytes so the third Put triggers the flush.
+	e := newTestEngineWithMemCapacity(t, 60)
+
+	e.Put("k1", []byte("v1"))
+	e.Put("k2", []byte("v2"))
+
+	// After two puts: 50 bytes < 60 — no flush yet.
+	e.sstables.mu.RLock()
+	earlyCount := len(e.sstables.levels[0].sstList)
+	e.sstables.mu.RUnlock()
+	if earlyCount != 0 {
+		t.Errorf("expected 0 SSTs before threshold, got %d", earlyCount)
+	}
+
+	// Third put: 75 bytes >= 60 — flush should trigger.
+	e.Put("k3", []byte("v3"))
+
+	if !waitForL0Count(e, 1) {
+		t.Fatal("timed out: auto-flush did not fire after crossing memCapacity")
+	}
+
+	// All three keys must be readable.
+	for i := 1; i <= 3; i++ {
+		k := fmt.Sprintf("k%d", i)
+		want := fmt.Sprintf("v%d", i)
+		val, err := e.Get(k)
+		if err != nil {
+			t.Errorf("Get(%q) after auto-flush: %v", k, err)
+		} else if string(val) != want {
+			t.Errorf("Get(%q) = %q, want %q", k, val, want)
+		}
+	}
+}

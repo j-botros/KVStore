@@ -83,6 +83,12 @@ func (e *StorageEngine) Put(key string, value []byte) error {
 
 	// Push to Memtable
 	e.active.memtable.insert(key, value, seq)
+
+	// Flush if Memtable is full
+	if e.active.memtable.sizeBytes >= e.memCapacity {
+		go func() { _ = e.Flush() }()
+	}
+
 	return nil
 }
 
@@ -101,6 +107,12 @@ func (e *StorageEngine) Delete(key string) error {
 
 	// Delete from Memtable
 	e.active.memtable.delete(key, seq)
+
+	// Flush if Memtable is full
+	if e.active.memtable.sizeBytes >= e.memCapacity {
+		go func() { _ = e.Flush() }()
+	}
+
 	return nil
 }
 

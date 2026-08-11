@@ -170,8 +170,31 @@ func newTestEngineWithCapacity(t *testing.T, sstCap uint64) *StorageEngine {
 	crcTable := crc32.MakeTable(crc32.Castagnoli)
 
 	return &StorageEngine{
-		memCapacity:    4096,
+		memCapacity:    defaultSstCapacity, // large enough to never auto-flush in non-flush tests
 		sstCapacity:    sstCap,
+		crcTable:       crcTable,
+		nextFileNumber: 1,
+		nextSeq:        1,
+		active:         newMemlog(1, crcTable),
+		immutables:     make([]*memlog, 0),
+		sstables:       newSstables(4096, 10, crcTable),
+	}
+}
+
+// newTestEngineWithMemCapacity is like newTestEngine but sets a custom memCapacity
+// so that auto-flush triggers after a controlled number of writes.
+func newTestEngineWithMemCapacity(t *testing.T, memCap uint64) *StorageEngine {
+	t.Helper()
+	setupTestDir(t)
+	if err := os.MkdirAll("data/wal", 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	crcTable := crc32.MakeTable(crc32.Castagnoli)
+
+	return &StorageEngine{
+		memCapacity:    memCap,
+		sstCapacity:    defaultSstCapacity,
 		crcTable:       crcTable,
 		nextFileNumber: 1,
 		nextSeq:        1,
