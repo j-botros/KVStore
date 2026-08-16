@@ -1,7 +1,6 @@
 package service
 
 import (
-	"errors"
 	storageengine "kvstore/pkg/kvstore/storageEngine"
 )
 
@@ -9,9 +8,13 @@ type Service struct {
 	engine *storageengine.StorageEngine
 }
 
+func NewService(engine *storageengine.StorageEngine) *Service {
+	return &Service{engine: engine}
+}
+
 func (s *Service) Get(key string) ([]byte, error) {
 	value, err := s.engine.Get(key)
-	if errors.Is(err, storageengine.ErrKeyNotFound) {
+	if err == storageengine.ErrKeyNotFound {
 		return nil, ErrNotFound
 	} else if err != nil {
 		return nil, err

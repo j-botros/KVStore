@@ -24,6 +24,29 @@ type StorageEngine struct {
 	compacting atomic.Bool  // serializes Compact; allows concurrent Flush calls
 }
 
+func NewStorageEngine(memCapacity uint64, sstCapacity uint64, l0Capacity uint64, growthFactor int) *StorageEngine {
+	crcTable := crc32.MakeTable(crc32.Castagnoli)
+
+	nextFileNumber := uint64(0)
+	ml := newMemlog(nextFileNumber, crcTable)
+	nextFileNumber++
+
+	return &StorageEngine{
+		memCapacity: memCapacity,
+		sstCapacity: sstCapacity,
+		crcTable:    crcTable,
+
+		nextFileNumber: nextFileNumber,
+		nextSeq:        0,
+
+		active:     ml,
+		immutables: make([]*memlog, 0),
+		sstables:   newSstables(l0Capacity, growthFactor, crcTable),
+
+		// mu and compacting are ready to use with their zero values (unlocked and false)
+	}
+}
+
 type memlog struct {
 	memtable *memtable
 	wal      *wal

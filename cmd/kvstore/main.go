@@ -1,74 +1,90 @@
 package main
 
 import (
-	"encoding/json"
-	"fmt"
+	"kvstore/pkg/kvstore"
+	ctrl "kvstore/pkg/kvstore/interface/http"
+	service "kvstore/pkg/kvstore/service"
+	storageengine "kvstore/pkg/kvstore/storageEngine"
 	"log"
-	"net/http"
 	"os"
 
-	"github.com/prometheus/client_golang/prometheus/promhttp"
-	// "kvstore/pkg/kvstore"
+	"gopkg.in/yaml.v3"
 )
 
-type Config struct {
-	Port                     int    `json:"port"`
-	LogDestination           string `json:"log_destination"`
-	MaxNumberOfKeys          int    `json:"max_number_of_keys"`
-	MaxValueMemoryUsageBytes int    `json:"max_value_memory_usage_bytes"`
-	MaxValueSizeBytes        int    `json:"max_value_size_bytes"`
-	MaxKeySizeBytes          int    `json:"max_key_size_bytes"`
-	ReadTimeoutMs            int    `json:"read_timeout_ms"`
-	WriteTimeoutMs           int    `json:"write_timeout_ms"`
-}
-
 func main() {
-	// Read the config file
-	data, err := os.ReadFile("config.json")
-	if err != nil {
-		log.Fatalf("Failed to read config.json: %v", err)
-	}
-
-	var config Config
-	if err := json.Unmarshal(data, &config); err != nil {
-		log.Fatalf("Failed to parse config.json: %v", err)
-	}
-
 	// Configure logging
-	if config.LogDestination != "stdout" && config.LogDestination != "" {
-		file, err := os.OpenFile(config.LogDestination, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
-		if err != nil {
-			log.Fatalf("Failed to open log file %s: %v", config.LogDestination, err)
-		}
-		defer file.Close()
-		log.SetOutput(file)
-	} else {
-		log.SetOutput(os.Stdout)
+	log.SetOutput(os.Stdout)
+
+	// Read the config file
+	configFile, err := os.ReadFile("config.yaml")
+	if err != nil {
+		log.Fatalf("Failed to read config.yaml: %v", err)
 	}
 
-	// Define root handler
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
+	var config config
+	err = yaml.Unmarshal(configFile, &config)
+	if err != nil {
+		log.Fatalf("Failed to parse config.yaml: %v", err)
+	}
 
-		w.Write([]byte(`{
-			"service": "kvstore",
-			"status": "running",
-			"endpoints": {
-				"GET /kv/{key}": "retrieve value",
-				"POST /kv/{key}": "set key/value",
-				"DELETE /kv/{key}": "delete key"
-			}
-		}`))
-	})
+	engine := storageengine.NewStorageEngine(
+		config.storage.memtableSizeMb*1024*1024,
+		config.storage.sstSizeMb*1024*1024,
+		config.storage.l0SizeMb*1024*1024,
+		config.storage.lvlGrowthFactor,
+	)
 
-	http.Handle("/metrics", promhttp.Handler())
+	service := service.NewService(engine)
 
-	// Configure HTTP server port
-	portStr := fmt.Sprintf(":%d", config.Port)
-	log.Printf("Starting server on port %s...\n", portStr)
+	ctrl := ctrl.NewStoreController(service)
 
-	// Open the port and start listening for HTTP requests
-	if err := http.ListenAndServe(portStr, nil); err != nil {
+	kvstore := kvstore.NewKVStore(ctrl)
+
+	err = kvstore.Start(config.server.httpPort, config.server.nodeId)
+	if err != nil {
 		log.Fatalf("Server failed to start: %v", err)
 	}
+}
+
+/* ====================================================================================
+	CONFIG STRUCTS
+==================================================================================== */
+
+type config struct {
+	server  serverConfig  `yaml:"server"`
+	storage storageConfig `yaml:"storage"`
+	cluster clusterConfig `yaml:"cluster"`
+}
+
+type serverConfig struct {
+	nodeId   string `yaml:"node_id"`
+	httpPort int    `yaml:"http_port"`
+	grpcPort int    `yaml:"grpc_port"`
+	dataDir  string `yaml:"data_dir"`
+}
+
+type storageConfig struct {
+	memtableSizeMb  uint64 `yaml:"memtable_size_mb"`
+	walSizeMb       uint64 `yaml:"wal_segment_size_mb"`
+	sstSizeMb       uint64 `yaml:"sst_size_mb"`
+	l0SizeMb        uint64 `yaml:"level0_max_size_mb"`
+	lvlGrowthFactor int    `yaml:"level_size_multiplier"`
+}
+
+type clusterConfig struct {
+	nodes  []nodeConfig  `yaml:"nodes"`
+	shards []shardConfig `yaml:"shards"`
+}
+
+type nodeConfig struct {
+	id       string `yaml:"id"`
+	grpcAddr string `yaml:"grpc_addr"`
+}
+
+type shardConfig struct {
+	id        string   `yaml:"id"`
+	startKey  string   `yaml:"start_key"`
+	endKey    string   `yaml:"end_key"`
+	leader    string   `yaml:"leader"`
+	followers []string `yaml:"followers"`
 }
