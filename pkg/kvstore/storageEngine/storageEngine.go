@@ -109,7 +109,7 @@ func (e *StorageEngine) Put(key string, value []byte) error {
 
 	// Flush if Memtable is full
 	if e.active.memtable.sizeBytes >= e.memCapacity {
-		go func() { _ = e.Flush() }()
+		go func() { _ = e.flush() }()
 	}
 
 	return nil
@@ -133,7 +133,7 @@ func (e *StorageEngine) Delete(key string) error {
 
 	// Flush if Memtable is full
 	if e.active.memtable.sizeBytes >= e.memCapacity {
-		go func() { _ = e.Flush() }()
+		go func() { _ = e.flush() }()
 	}
 
 	return nil
@@ -143,7 +143,7 @@ func (e *StorageEngine) Delete(key string) error {
 	BACKGROUND METHODS
 ==================================================================================== */
 
-func (e *StorageEngine) Flush() error {
+func (e *StorageEngine) flush() error {
 	// Step 1: Rotate active memlog to immutables under write lock
 	e.mu.Lock()
 	ml := e.active
@@ -183,13 +183,13 @@ func (e *StorageEngine) Flush() error {
 	e.sstables.mu.RUnlock()
 
 	if compactSrc != nil {
-		go func() { _ = e.Compact(compactSrc) }()
+		go func() { _ = e.compact(compactSrc) }()
 	}
 
 	return nil
 }
 
-func (e *StorageEngine) Compact(srcSst *sst) error {
+func (e *StorageEngine) compact(srcSst *sst) error {
 	// Serialization guard: only one compaction at a time
 	if !e.compacting.CompareAndSwap(false, true) {
 		return nil
@@ -298,7 +298,7 @@ func (e *StorageEngine) Compact(srcSst *sst) error {
 
 	// Step 5: Cascade compaction to the next level if it's now over capacity
 	if nextSrc != nil {
-		go func() { _ = e.Compact(nextSrc) }()
+		go func() { _ = e.compact(nextSrc) }()
 	}
 
 	return nil

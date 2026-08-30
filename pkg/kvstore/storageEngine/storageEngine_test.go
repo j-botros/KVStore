@@ -134,7 +134,7 @@ func TestStorageEngine_Flush(t *testing.T) {
 	e.Put("k1", []byte("v1"))
 	e.Put("k2", []byte("v2"))
 
-	if err := e.Flush(); err != nil {
+	if err := e.flush(); err != nil {
 		t.Fatalf("Flush failed: %v", err)
 	}
 
@@ -168,7 +168,7 @@ func TestStorageEngine_Compact_Basic(t *testing.T) {
 	e.Put("a", []byte("1"))
 	e.Put("b", []byte("2"))
 	e.Put("c", []byte("3"))
-	if err := e.Flush(); err != nil {
+	if err := e.flush(); err != nil {
 		t.Fatalf("Flush failed: %v", err)
 	}
 
@@ -178,7 +178,7 @@ func TestStorageEngine_Compact_Basic(t *testing.T) {
 	}
 	srcSst := l0.sstList[0]
 
-	if err := e.Compact(srcSst); err != nil {
+	if err := e.compact(srcSst); err != nil {
 		t.Fatalf("Compact failed: %v", err)
 	}
 
@@ -230,14 +230,14 @@ func TestStorageEngine_Compact_OverlapMerge(t *testing.T) {
 	e.Put("b", []byte("new-b"))
 	e.Put("c", []byte("new-c"))
 	e.Put("d", []byte("new-d"))
-	if err := e.Flush(); err != nil {
+	if err := e.flush(); err != nil {
 		t.Fatalf("Flush failed: %v", err)
 	}
 
 	l0 := e.sstables.levels[0]
 	srcSst := l0.sstList[0]
 
-	if err := e.Compact(srcSst); err != nil {
+	if err := e.compact(srcSst); err != nil {
 		t.Fatalf("Compact failed: %v", err)
 	}
 
@@ -290,10 +290,10 @@ func TestStorageEngine_Compact_MultiOutput(t *testing.T) {
 	e.Put("k3", []byte("v3"))
 	e.Put("k4", []byte("v4"))
 	e.Put("k5", []byte("v5"))
-	e.Flush()
+	e.flush()
 
 	srcSst := e.sstables.levels[0].sstList[0]
-	if err := e.Compact(srcSst); err != nil {
+	if err := e.compact(srcSst); err != nil {
 		t.Fatalf("Compact failed: %v", err)
 	}
 
@@ -321,7 +321,7 @@ func TestStorageEngine_Compact_Serialization(t *testing.T) {
 
 	// Flush an SST so we have something to compact
 	e.Put("x", []byte("1"))
-	e.Flush()
+	e.flush()
 
 	srcSst := e.sstables.levels[0].sstList[0]
 
@@ -329,7 +329,7 @@ func TestStorageEngine_Compact_Serialization(t *testing.T) {
 	e.compacting.Store(true)
 
 	// A second compaction attempt should return nil immediately
-	err := e.Compact(srcSst)
+	err := e.compact(srcSst)
 	if err != nil {
 		t.Errorf("concurrent Compact should return nil, got %v", err)
 	}
@@ -341,7 +341,7 @@ func TestStorageEngine_Compact_Serialization(t *testing.T) {
 
 	// Release the flag and verify real compaction works
 	e.compacting.Store(false)
-	if err := e.Compact(srcSst); err != nil {
+	if err := e.compact(srcSst); err != nil {
 		t.Fatalf("Compact after releasing flag: %v", err)
 	}
 
@@ -364,7 +364,7 @@ func TestStorageEngine_Flush_Concurrent(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		errs[0] = e.Flush()
+		errs[0] = e.flush()
 	}()
 
 	// Give the first flush a moment to rotate
@@ -378,7 +378,7 @@ func TestStorageEngine_Flush_Concurrent(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		errs[1] = e.Flush()
+		errs[1] = e.flush()
 	}()
 
 	wg.Wait()
@@ -416,7 +416,7 @@ func TestStorageEngine_Flush_RotatesMemlog(t *testing.T) {
 	oldActive := e.active
 	e.mu.RUnlock()
 
-	if err := e.Flush(); err != nil {
+	if err := e.flush(); err != nil {
 		t.Fatalf("Flush failed: %v", err)
 	}
 
@@ -456,7 +456,7 @@ func TestStorageEngine_Flush_TriggersCompaction(t *testing.T) {
 
 	e.Put("trigger", []byte("compact"))
 
-	if err := e.Flush(); err != nil {
+	if err := e.flush(); err != nil {
 		t.Fatalf("Flush failed: %v", err)
 	}
 

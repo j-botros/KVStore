@@ -1,6 +1,7 @@
 package storageengine
 
 import (
+	"fmt"
 	"hash/crc32"
 	"os"
 	"strings"
@@ -40,8 +41,8 @@ func TestNewSst_Metadata(t *testing.T) {
 	if s.endKey != "cherry" {
 		t.Errorf("endKey = %q, want %q", s.endKey, "cherry")
 	}
-	if s.lastSeq != 2 {
-		t.Errorf("lastSeq = %d, want 2 (seq of last key cherry)", s.lastSeq)
+	if s.lastSeq != 3 {
+		t.Errorf("lastSeq = %d, want 3 (max seq across all entries)", s.lastSeq)
 	}
 }
 
@@ -252,7 +253,13 @@ func TestNewSst_FooterRoundTrip(t *testing.T) {
 	}
 
 	// Read the footer back from the file written by newSst.
-	idx, bf, err := s.readFooter()
+	filename := fmt.Sprintf("data/sstables/level-%d/%d.sst", s.level, s.filenum)
+	f, err := os.Open(filename)
+	if err != nil {
+		t.Fatalf("open sst file: %v", err)
+	}
+	defer f.Close()
+	idx, bf, _, err := readFooter(f)
 	if err != nil {
 		t.Fatalf("readFooter: %v", err)
 	}
@@ -521,8 +528,12 @@ func TestSst_ReadFooter(t *testing.T) {
 	}
 	writeSyntheticSST(t, 0, 1, entries, crcTab)
 
-	s := &sst{filenum: 1, level: 0, crcTable: crcTab}
-	idx, bf, err := s.readFooter()
+	f, err := os.Open("data/sstables/level-0/1.sst")
+	if err != nil {
+		t.Fatalf("open sst file: %v", err)
+	}
+	defer f.Close()
+	idx, bf, _, err := readFooter(f)
 	if err != nil {
 		t.Fatalf("readFooter: %v", err)
 	}
@@ -571,10 +582,254 @@ func TestSst_ReadFooter_BadMagic(t *testing.T) {
 	}
 	f.Close()
 
-	s := &sst{filenum: 1, level: 0, crcTable: crcTab}
-	_, _, err = s.readFooter()
+	f2, err := os.Open("data/sstables/level-0/1.sst")
+	if err != nil {
+		t.Fatalf("open sst file: %v", err)
+	}
+	defer f2.Close()
+	_, _, _, err = readFooter(f2)
 	if err != ErrBadFile {
 		t.Errorf("readFooter with bad magic: err = %v, want ErrBadFile", err)
+	}
+}
+
+/* ====================================================================================
+	REPLAY SST TESTS
+==================================================================================== */
+
+// TestReplaySst_RoundTrip writes an SST via newSstFromMemtable and then replays
+// it, checking that all metadata matches.
+func TestReplaySst_RoundTrip(t *testing.T) {
+	setupTestDir(t)
+	crcTab := crc32.MakeTable(crc32.Castagnoli)
+
+	entries := []testEntry{
+		{key: "apple", value: []byte("red"), seq: 1},
+		{key: "banana", value: []byte("yellow"), seq: 5},
+		{key: "cherry", value: []byte("dark-red"), seq: 3},
+	}
+	m := newTestMemtable(t, entries)
+	s, err := newSstFromMemtable(7, m, crcTab)
+	if err != nil {
+		t.Fatalf("newSstFromMemtable: %v", err)
+	}
+
+	replayed, err := replaySst("data/sstables/level-0/7.sst", crcTab)
+	if err != nil {
+		t.Fatalf("replaySst: %v", err)
+	}
+
+	if replayed.filenum != s.filenum {
+		t.Errorf("filenum = %d, want %d", replayed.filenum, s.filenum)
+	}
+	if replayed.level != s.level {
+		t.Errorf("level = %d, want %d", replayed.level, s.level)
+	}
+	if replayed.startKey != s.startKey {
+		t.Errorf("startKey = %q, want %q", replayed.startKey, s.startKey)
+	}
+	if replayed.endKey != s.endKey {
+		t.Errorf("endKey = %q, want %q", replayed.endKey, s.endKey)
+	}
+	if replayed.lastSeq != s.lastSeq {
+		t.Errorf("lastSeq = %d, want %d", replayed.lastSeq, s.lastSeq)
+	}
+	if replayed.sizeBytes != s.sizeBytes {
+		t.Errorf("sizeBytes = %d, want %d", replayed.sizeBytes, s.sizeBytes)
+	}
+	if replayed.index == nil || len(*replayed.index) == 0 {
+		t.Fatal("replayed index is nil or empty")
+	}
+	if replayed.bloomFilter == nil {
+		t.Fatal("replayed bloom filter is nil")
+	}
+}
+
+// TestReplaySst_KeysSearchable verifies that the replayed sst can serve reads.
+func TestReplaySst_KeysSearchable(t *testing.T) {
+	setupTestDir(t)
+	crcTab := crc32.MakeTable(crc32.Castagnoli)
+
+	entries := []testEntry{
+		{key: "dog", value: []byte("bark"), seq: 2},
+		{key: "fox", value: []byte("quick"), seq: 4},
+	}
+	m := newTestMemtable(t, entries)
+	_, err := newSstFromMemtable(1, m, crcTab)
+	if err != nil {
+		t.Fatalf("newSstFromMemtable: %v", err)
+	}
+
+	replayed, err := replaySst("data/sstables/level-0/1.sst", crcTab)
+	if err != nil {
+		t.Fatalf("replaySst: %v", err)
+	}
+
+	for _, e := range entries {
+		res, err := replayed.search(e.key)
+		if err != nil {
+			t.Errorf("search(%q) after replay: %v", e.key, err)
+			continue
+		}
+		if string(res.value) != string(e.value) {
+			t.Errorf("search(%q) = %q, want %q", e.key, res.value, e.value)
+		}
+	}
+}
+
+// TestReplaySst_SingleEntry checks the edge case of an SST with exactly one entry.
+// startKey and endKey must both equal that single key.
+func TestReplaySst_SingleEntry(t *testing.T) {
+	setupTestDir(t)
+	crcTab := crc32.MakeTable(crc32.Castagnoli)
+
+	entries := []testEntry{
+		{key: "only", value: []byte("one"), seq: 42},
+	}
+	m := newTestMemtable(t, entries)
+	_, err := newSstFromMemtable(1, m, crcTab)
+	if err != nil {
+		t.Fatalf("newSstFromMemtable: %v", err)
+	}
+
+	replayed, err := replaySst("data/sstables/level-0/1.sst", crcTab)
+	if err != nil {
+		t.Fatalf("replaySst: %v", err)
+	}
+
+	if replayed.startKey != "only" {
+		t.Errorf("startKey = %q, want %q", replayed.startKey, "only")
+	}
+	if replayed.endKey != "only" {
+		t.Errorf("endKey = %q, want %q", replayed.endKey, "only")
+	}
+	if replayed.lastSeq != 42 {
+		t.Errorf("lastSeq = %d, want 42", replayed.lastSeq)
+	}
+}
+
+// TestReplaySst_TombstoneEntry verifies that a tombstone entry is replayed and
+// reflected in lastSeq. search() returns the raw entry with tombstone=true;
+// tombstone interpretation is the caller's responsibility (see sstables.get).
+func TestReplaySst_TombstoneEntry(t *testing.T) {
+	setupTestDir(t)
+	crcTab := crc32.MakeTable(crc32.Castagnoli)
+
+	entries := []testEntry{
+		{key: "alive", value: []byte("yes"), seq: 1},
+		{key: "dead", value: []byte{}, seq: 9, tombstone: true},
+	}
+	m := newTestMemtable(t, entries)
+	_, err := newSstFromMemtable(1, m, crcTab)
+	if err != nil {
+		t.Fatalf("newSstFromMemtable: %v", err)
+	}
+
+	replayed, err := replaySst("data/sstables/level-0/1.sst", crcTab)
+	if err != nil {
+		t.Fatalf("replaySst: %v", err)
+	}
+
+	// lastSeq must reflect the tombstone's seq (9 > 1)
+	if replayed.lastSeq != 9 {
+		t.Errorf("lastSeq = %d, want 9", replayed.lastSeq)
+	}
+
+	// search() returns the raw entry; tombstone flag must be set
+	e, err := replayed.search("dead")
+	if err != nil {
+		t.Fatalf("search(\"dead\"): %v", err)
+	}
+	if !e.tombstone {
+		t.Error("tombstone = false, want true")
+	}
+	if e.seq != 9 {
+		t.Errorf("seq = %d, want 9", e.seq)
+	}
+}
+
+// TestReplaySst_HigherLevelPath verifies that replaySst correctly parses level
+// and filenum from a deeper level path (e.g. level-2/5.sst).
+func TestReplaySst_HigherLevelPath(t *testing.T) {
+	setupTestDir(t)
+	crcTab := crc32.MakeTable(crc32.Castagnoli)
+
+	entries := []testEntry{
+		{key: "m", value: []byte("mid"), seq: 7},
+		{key: "z", value: []byte("end"), seq: 8},
+	}
+	// Write a synthetic SST at level 2, filenum 5
+	writeSyntheticSST(t, 2, 5, entries, crcTab)
+
+	replayed, err := replaySst("data/sstables/level-2/5.sst", crcTab)
+	if err != nil {
+		t.Fatalf("replaySst: %v", err)
+	}
+
+	if replayed.level != 2 {
+		t.Errorf("level = %d, want 2", replayed.level)
+	}
+	if replayed.filenum != 5 {
+		t.Errorf("filenum = %d, want 5", replayed.filenum)
+	}
+}
+
+// TestReplaySst_BadPath verifies that an unrecognised path format returns an error.
+func TestReplaySst_BadPath(t *testing.T) {
+	setupTestDir(t)
+	crcTab := crc32.MakeTable(crc32.Castagnoli)
+
+	_, err := replaySst("not-a-valid/path/file.sst", crcTab)
+	if err == nil {
+		t.Error("expected error for bad path format, got nil")
+	}
+	if !strings.Contains(err.Error(), "could not parse") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+// TestReplaySst_FileNotFound verifies that a missing file returns an OS error.
+func TestReplaySst_FileNotFound(t *testing.T) {
+	setupTestDir(t)
+	crcTab := crc32.MakeTable(crc32.Castagnoli)
+
+	_, err := replaySst("data/sstables/level-0/999.sst", crcTab)
+	if err == nil {
+		t.Error("expected error for non-existent file, got nil")
+	}
+}
+
+// TestReplaySst_CorruptMagic verifies that a file with a corrupt footer
+// returns ErrBadFile wrapped in the replaySst error.
+func TestReplaySst_CorruptMagic(t *testing.T) {
+	setupTestDir(t)
+	crcTab := crc32.MakeTable(crc32.Castagnoli)
+
+	entries := []testEntry{
+		{key: "a", value: []byte("b"), seq: 1},
+	}
+	writeSyntheticSST(t, 0, 1, entries, crcTab)
+
+	// Corrupt the last 8 bytes (magic bytes)
+	fi, err := os.Stat("data/sstables/level-0/1.sst")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile("data/sstables/level-0/1.sst", os.O_RDWR, 0644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteAt([]byte{0, 0, 0, 0, 0, 0, 0, 0}, fi.Size()-8); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	_, err = replaySst("data/sstables/level-0/1.sst", crcTab)
+	if err == nil {
+		t.Fatal("expected error for corrupt magic, got nil")
+	}
+	if !strings.Contains(err.Error(), ErrBadFile.Error()) {
+		t.Errorf("unexpected error: %v", err)
 	}
 }
 

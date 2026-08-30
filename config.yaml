@@ -7,7 +7,6 @@ server:
 storage:
   memtable_size_mb: 64
   sst_size_mb: 64
-  wal_segment_size_mb: 64
   level0_max_size_mb: 256
   level_size_multiplier: 10
 

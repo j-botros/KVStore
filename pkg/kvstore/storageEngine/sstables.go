@@ -300,7 +300,7 @@ func newSstFromMemtable(filenum uint64, memtable *memtable, crcTable *crc32.Tabl
 
 		currentBlockBuf.Write(entryBuf.Bytes())
 
-		lastSeq = curr.seq
+		lastSeq = max(lastSeq, curr.seq)
 		endKey = curr.key
 		curr = curr.next[0]
 
@@ -355,7 +355,7 @@ func newSstFromMemtable(filenum uint64, memtable *memtable, crcTable *crc32.Tabl
 		return nil, err
 	}
 
-	sst.lastSeq = lastSeq
+	sst.lastSeq = max(sst.lastSeq, lastSeq)
 	sst.startKey = startKey
 	sst.endKey = endKey
 	sst.sizeBytes = indexOffset
@@ -483,7 +483,7 @@ func (cw *compactionWriter) writeEntry(e *entry) {
 		cw.startKey = e.key
 	}
 	cw.endKey = e.key
-	cw.lastSeq = e.seq
+	cw.lastSeq = max(cw.lastSeq, e.seq)
 	cw.numKeys++
 
 	if cw.currentBlockBuf.Len() >= TARGET_BLOCK_SIZE {
@@ -501,7 +501,7 @@ func (cw *compactionWriter) finalize() error {
 	cw.sst.index = &cw.idx
 	cw.sst.startKey = cw.startKey
 	cw.sst.endKey = cw.endKey
-	cw.sst.lastSeq = cw.lastSeq
+	cw.sst.lastSeq = max(cw.sst.lastSeq, cw.lastSeq)
 	cw.sst.sizeBytes = uint64(cw.fileBuffer.Len()) // data bytes before index/bloom/footer
 
 	// Index section: keyLen(4) key offset(8) length(8) per block
@@ -834,69 +834,61 @@ func (index *index) getDatablock(key string) (offset uint64, length uint64, err 
 	return 0, 0, ErrKeyNotFound
 }
 
-func (sst *sst) readFooter() (idx *index, bf *bloomFilter, err error) {
-	// Read from file
-	filename := fmt.Sprintf("data/sstables/level-%d/%d.sst", sst.level, sst.filenum)
-
-	sstFile, err := os.Open(filename)
-	if err != nil {
-		return nil, nil, err
-	}
-	defer sstFile.Close()
-
+// readFooter reads the footer, index, and bloom filter from an open SST file.
+// The file offset is not assumed; the function seeks to the footer itself.
+func readFooter(sstFile *os.File) (idx *index, bf *bloomFilter, indexOffset uint64, err error) {
 	_, err = sstFile.Seek(-FOOTER_SIZE, io.SeekEnd)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, 0, err
 	}
 
 	buf := make([]byte, FOOTER_SIZE)
 	_, err = io.ReadFull(sstFile, buf)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, 0, err
 	}
 
 	// Verify magic
 	magic := binary.LittleEndian.Uint64(buf[32:40])
 	if magic != FOOTER_MAGIC {
-		return nil, nil, ErrBadFile
+		return nil, nil, 0, ErrBadFile
 	}
 
 	// Instantiate index
-	indexOffset := binary.LittleEndian.Uint64(buf[0:8])
+	indexOffset = binary.LittleEndian.Uint64(buf[0:8])
 	indexLength := binary.LittleEndian.Uint64(buf[8:16])
 
 	slice := make(index, 0)
 	idx = &slice
 	r := io.NewSectionReader(sstFile, int64(indexOffset), int64(indexLength))
 
-	var prevBlockKey string
-	prevBlockKey = ""
+	prevBlockKey := ""
 	for {
 		var keyLength uint32
 		err = binary.Read(r, binary.LittleEndian, &keyLength)
 		if err == io.EOF {
 			break
 		} else if err != nil {
-			return nil, nil, err
+			return nil, nil, 0, err
 		}
 
 		keyBuf := make([]byte, keyLength)
 		_, err = io.ReadFull(r, keyBuf)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, 0, err
 		}
 		lastKey := string(keyBuf)
 
 		var offset uint64
 		err = binary.Read(r, binary.LittleEndian, &offset)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, 0, err
 		}
 
 		var length uint64
 		err = binary.Read(r, binary.LittleEndian, &length)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, 0, err
 		}
 
 		block := newBlock(lastKey, offset, length, prevBlockKey)
@@ -911,13 +903,89 @@ func (sst *sst) readFooter() (idx *index, bf *bloomFilter, err error) {
 	bfBuf := make([]byte, bloomLength)
 	_, err = sstFile.ReadAt(bfBuf, int64(bloomOffset))
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, 0, err
 	}
 
 	bf = newBloomFilter(bloomLength)
 	bf.bitstring = bfBuf
 
-	return idx, bf, nil
+	return idx, bf, indexOffset, nil
+}
+
+// replaySst opens an SST file on disk and reconstructs the in-memory sst struct
+// without reading any data blocks
+func replaySst(fpath string, crcTable *crc32.Table) (*sst, error) {
+	// --- Parse level and filenum from fpath ---
+	// Expected format: "data/sstables/level-N/F.sst"
+	var lvl int
+	var filenum uint64
+	_, err := fmt.Sscanf(
+		filepath.Base(filepath.Dir(fpath))+"/"+filepath.Base(fpath),
+		"level-%d/%d.sst",
+		&lvl, &filenum,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("replaySst: could not parse level/filenum from path %q: %w", fpath, err)
+	}
+
+	// --- Open file ---
+	sstFile, err := os.Open(fpath)
+	if err != nil {
+		return nil, err
+	}
+	defer sstFile.Close()
+
+	// --- Read footer ---
+	idx, bf, indexOffset, err := readFooter(sstFile)
+	if err != nil {
+		return nil, fmt.Errorf("replaySst %q: %w", fpath, err)
+	}
+	if len(*idx) == 0 {
+		return nil, fmt.Errorf("replaySst %q: index is empty", fpath)
+	}
+
+	// --- Derive startKey and endKey from index ---
+	firstBlock := (*idx)[0]
+	lastBlock := (*idx)[len(*idx)-1]
+	endKey := lastBlock.lastKey
+
+	// Scan first block to find its first key (= overall startKey)
+	firstBlockRdr := io.NewSectionReader(sstFile, int64(firstBlock.offset), int64(firstBlock.length))
+	firstEntry, err := readEntry(firstBlockRdr, crcTable)
+	if err != nil {
+		return nil, fmt.Errorf("replaySst %q: could not read first entry: %w", fpath, err)
+	}
+	startKey := firstEntry.key
+
+	// --- Derive lastSeq by scanning all data blocks ---
+	lastSeq := uint64(0)
+	for _, blk := range *idx {
+		r := io.NewSectionReader(sstFile, int64(blk.offset), int64(blk.length))
+		for {
+			e, err := readEntry(r, crcTable)
+			if err == ErrEntryNotFound {
+				break
+			} else if err != nil {
+				return nil, fmt.Errorf("replaySst %q: error scanning data block: %w", fpath, err)
+			}
+			if e.seq > lastSeq {
+				lastSeq = e.seq
+			}
+		}
+	}
+
+	return &sst{
+		filenum:     filenum,
+		level:       lvl,
+		lastSeq:     lastSeq,
+		startKey:    startKey,
+		endKey:      endKey,
+		capacity:    0, // unknown at replay time; not needed for read path
+		sizeBytes:   indexOffset,
+		index:       idx,
+		bloomFilter: bf,
+		crcTable:    crcTable,
+	}, nil
 }
 
 type entry struct {

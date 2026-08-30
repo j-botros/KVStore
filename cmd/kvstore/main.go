@@ -27,6 +27,13 @@ func main() {
 		log.Fatalf("Failed to parse config.yaml: %v", err)
 	}
 
+	if config.storage.l0SizeMb == 0 {
+		log.Fatalf("Invalid configuration: level0_max_size_mb must be greater than 0")
+	}
+	if config.storage.lvlGrowthFactor <= 1 {
+		log.Fatalf("Invalid configuration: level_size_multiplier must be greater than 1")
+	}
+
 	engine := storageengine.NewStorageEngine(
 		config.storage.memtableSizeMb*1024*1024,
 		config.storage.sstSizeMb*1024*1024,
@@ -65,7 +72,6 @@ type serverConfig struct {
 
 type storageConfig struct {
 	memtableSizeMb  uint64 `yaml:"memtable_size_mb"`
-	walSizeMb       uint64 `yaml:"wal_segment_size_mb"`
 	sstSizeMb       uint64 `yaml:"sst_size_mb"`
 	l0SizeMb        uint64 `yaml:"level0_max_size_mb"`
 	lvlGrowthFactor int    `yaml:"level_size_multiplier"`
