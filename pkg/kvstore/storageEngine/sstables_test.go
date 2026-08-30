@@ -1315,3 +1315,312 @@ func TestCompact_OverlapMultipleSSTs(t *testing.T) {
 		}
 	}
 }
+
+/* ====================================================================================
+	REBUILD SSTABLES TESTS
+==================================================================================== */
+
+// TestRebuildSstables_NoDataDir verifies that rebuildSstables succeeds on a
+// completely fresh engine where data/sstables/ does not exist yet.
+func TestRebuildSstables_NoDataDir(t *testing.T) {
+	setupTestDir(t)
+	crcTab := crc32.MakeTable(crc32.Castagnoli)
+
+	ssts, maxSeq, maxFilenum, err := rebuildSstables(4096, 10, crcTab)
+	if err != nil {
+		t.Fatalf("rebuildSstables: %v", err)
+	}
+	if len(ssts.levels) != 1 {
+		t.Errorf("levels = %d, want 1 (only L0 from newSstables)", len(ssts.levels))
+	}
+	if len(ssts.levels[0].sstList) != 0 {
+		t.Errorf("L0 sstList len = %d, want 0", len(ssts.levels[0].sstList))
+	}
+	if maxSeq != 0 {
+		t.Errorf("maxSeq = %d, want 0", maxSeq)
+	}
+	if maxFilenum != 0 {
+		t.Errorf("maxFilenum = %d, want 0", maxFilenum)
+	}
+}
+
+// TestRebuildSstables_EmptyLevel0Dir verifies that an existing but empty
+// data/sstables/level-0/ directory produces no SSTs and zero maxSeq/maxFilenum.
+func TestRebuildSstables_EmptyLevel0Dir(t *testing.T) {
+	setupTestDir(t)
+	crcTab := crc32.MakeTable(crc32.Castagnoli)
+
+	if err := os.MkdirAll("data/sstables/level-0", 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	ssts, maxSeq, maxFilenum, err := rebuildSstables(4096, 10, crcTab)
+	if err != nil {
+		t.Fatalf("rebuildSstables: %v", err)
+	}
+	if len(ssts.levels[0].sstList) != 0 {
+		t.Errorf("L0 sstList len = %d, want 0", len(ssts.levels[0].sstList))
+	}
+	if maxSeq != 0 {
+		t.Errorf("maxSeq = %d, want 0", maxSeq)
+	}
+	if maxFilenum != 0 {
+		t.Errorf("maxFilenum = %d, want 0", maxFilenum)
+	}
+}
+
+// TestRebuildSstables_SingleSstL0 verifies a single SST written to L0 is
+// correctly replayed: metadata fields and a live search both match.
+func TestRebuildSstables_SingleSstL0(t *testing.T) {
+	setupTestDir(t)
+	crcTab := crc32.MakeTable(crc32.Castagnoli)
+
+	entries := []testEntry{
+		{key: "cat", value: []byte("meow"), seq: 3},
+		{key: "dog", value: []byte("bark"), seq: 7},
+	}
+	m := newTestMemtable(t, entries)
+	_, err := newSstFromMemtable(7, m, crcTab)
+	if err != nil {
+		t.Fatalf("newSstFromMemtable: %v", err)
+	}
+
+	ssts, maxSeq, maxFilenum, err := rebuildSstables(4096, 10, crcTab)
+	if err != nil {
+		t.Fatalf("rebuildSstables: %v", err)
+	}
+
+	if len(ssts.levels[0].sstList) != 1 {
+		t.Fatalf("L0 sstList len = %d, want 1", len(ssts.levels[0].sstList))
+	}
+	s := ssts.levels[0].sstList[0]
+	if s.filenum != 7 {
+		t.Errorf("filenum = %d, want 7", s.filenum)
+	}
+	if ssts.levels[0].sizeBytes == 0 {
+		t.Error("L0 sizeBytes = 0, want > 0")
+	}
+	if maxFilenum != 7 {
+		t.Errorf("maxFilenum = %d, want 7", maxFilenum)
+	}
+	if maxSeq != 7 {
+		t.Errorf("maxSeq = %d, want 7", maxSeq)
+	}
+
+	// Verify the replayed SST can serve reads
+	entry, err := s.search("dog")
+	if err != nil {
+		t.Fatalf("search(\"dog\"): %v", err)
+	}
+	if string(entry.value) != "bark" {
+		t.Errorf("search(\"dog\") = %q, want \"bark\"", entry.value)
+	}
+}
+
+// TestRebuildSstables_MultipleSstsL0 writes 3 SSTs with out-of-order key ranges
+// and verifies that sortByStartKey orders them correctly and sizeBytes accumulates.
+func TestRebuildSstables_MultipleSstsL0(t *testing.T) {
+	setupTestDir(t)
+	crcTab := crc32.MakeTable(crc32.Castagnoli)
+
+	// Write SSTs with deliberately interleaved key ranges and out-of-order filenums.
+	writeSyntheticSST(t, 0, 3, []testEntry{{key: "m", value: []byte("1"), seq: 10}, {key: "z", value: []byte("2"), seq: 11}}, crcTab)
+	writeSyntheticSST(t, 0, 1, []testEntry{{key: "a", value: []byte("3"), seq: 1}, {key: "e", value: []byte("4"), seq: 2}}, crcTab)
+	writeSyntheticSST(t, 0, 2, []testEntry{{key: "f", value: []byte("5"), seq: 5}, {key: "l", value: []byte("6"), seq: 6}}, crcTab)
+
+	ssts, maxSeq, maxFilenum, err := rebuildSstables(4096, 10, crcTab)
+	if err != nil {
+		t.Fatalf("rebuildSstables: %v", err)
+	}
+
+	if len(ssts.levels[0].sstList) != 3 {
+		t.Fatalf("L0 sstList len = %d, want 3", len(ssts.levels[0].sstList))
+	}
+
+	// Verify sorted order by startKey
+	list := ssts.levels[0].sstList
+	for i := 1; i < len(list); i++ {
+		if list[i].startKey <= list[i-1].startKey {
+			t.Errorf("sstList not sorted: [%d].startKey=%q <= [%d].startKey=%q",
+				i, list[i].startKey, i-1, list[i-1].startKey)
+		}
+	}
+
+	// sizeBytes must be the sum of all three SSTs' individual sizeBytes
+	expectedSize := list[0].sizeBytes + list[1].sizeBytes + list[2].sizeBytes
+	if ssts.levels[0].sizeBytes != expectedSize {
+		t.Errorf("L0 sizeBytes = %d, want %d", ssts.levels[0].sizeBytes, expectedSize)
+	}
+
+	if maxFilenum != 3 {
+		t.Errorf("maxFilenum = %d, want 3", maxFilenum)
+	}
+	if maxSeq != 11 {
+		t.Errorf("maxSeq = %d, want 11", maxSeq)
+	}
+}
+
+// TestRebuildSstables_MultipleLevel verifies that SSTs on L0 and L1 are placed
+// into the correct level slices and that each level's capacity follows the growth factor.
+func TestRebuildSstables_MultipleLevel(t *testing.T) {
+	setupTestDir(t)
+	crcTab := crc32.MakeTable(crc32.Castagnoli)
+
+	const l0Cap = uint64(4096)
+	const growthFactor = 10
+
+	writeSyntheticSST(t, 0, 1, []testEntry{{key: "a", value: []byte("v"), seq: 1}}, crcTab)
+	writeSyntheticSST(t, 1, 2, []testEntry{{key: "z", value: []byte("v"), seq: 2}}, crcTab)
+
+	ssts, maxSeq, maxFilenum, err := rebuildSstables(l0Cap, growthFactor, crcTab)
+	if err != nil {
+		t.Fatalf("rebuildSstables: %v", err)
+	}
+
+	if len(ssts.levels) < 2 {
+		t.Fatalf("levels len = %d, want >= 2", len(ssts.levels))
+	}
+	if len(ssts.levels[0].sstList) != 1 {
+		t.Errorf("L0 sstList len = %d, want 1", len(ssts.levels[0].sstList))
+	}
+	if len(ssts.levels[1].sstList) != 1 {
+		t.Errorf("L1 sstList len = %d, want 1", len(ssts.levels[1].sstList))
+	}
+
+	// Verify capacity geometry: L1 = L0 * growthFactor
+	wantL1Cap := l0Cap * uint64(growthFactor)
+	if ssts.levels[1].capacityBytes != wantL1Cap {
+		t.Errorf("L1 capacityBytes = %d, want %d", ssts.levels[1].capacityBytes, wantL1Cap)
+	}
+
+	if maxFilenum != 2 {
+		t.Errorf("maxFilenum = %d, want 2", maxFilenum)
+	}
+	if maxSeq != 2 {
+		t.Errorf("maxSeq = %d, want 2", maxSeq)
+	}
+}
+
+// TestRebuildSstables_MaxSeqAndFilenumTracking verifies that maxSeq and maxFilenum
+// reflect the true maximum across all SSTs, not just the last one processed.
+func TestRebuildSstables_MaxSeqAndFilenumTracking(t *testing.T) {
+	setupTestDir(t)
+	crcTab := crc32.MakeTable(crc32.Castagnoli)
+
+	// Highest seq lives in the middle SST (filenum 5); highest filenum is 10.
+	writeSyntheticSST(t, 0, 10, []testEntry{{key: "a", value: []byte("v"), seq: 3}}, crcTab)
+	writeSyntheticSST(t, 0, 5, []testEntry{{key: "g", value: []byte("v"), seq: 99}}, crcTab)
+	writeSyntheticSST(t, 0, 8, []testEntry{{key: "n", value: []byte("v"), seq: 7}}, crcTab)
+
+	_, maxSeq, maxFilenum, err := rebuildSstables(4096, 10, crcTab)
+	if err != nil {
+		t.Fatalf("rebuildSstables: %v", err)
+	}
+	if maxFilenum != 10 {
+		t.Errorf("maxFilenum = %d, want 10", maxFilenum)
+	}
+	if maxSeq != 99 {
+		t.Errorf("maxSeq = %d, want 99", maxSeq)
+	}
+}
+
+// TestRebuildSstables_NonSstFilesIgnored verifies that non-.sst files and
+// subdirectories inside a level directory are silently skipped.
+func TestRebuildSstables_NonSstFilesIgnored(t *testing.T) {
+	setupTestDir(t)
+	crcTab := crc32.MakeTable(crc32.Castagnoli)
+
+	writeSyntheticSST(t, 0, 1, []testEntry{{key: "k", value: []byte("v"), seq: 1}}, crcTab)
+
+	// Add a non-.sst file and a subdirectory in the same level directory.
+	if err := os.WriteFile("data/sstables/level-0/tmp.log", []byte("junk"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir("data/sstables/level-0/subdir", 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	ssts, _, _, err := rebuildSstables(4096, 10, crcTab)
+	if err != nil {
+		t.Fatalf("rebuildSstables: %v", err)
+	}
+	if len(ssts.levels[0].sstList) != 1 {
+		t.Errorf("L0 sstList len = %d, want 1 (non-.sst files must be ignored)", len(ssts.levels[0].sstList))
+	}
+}
+
+// TestRebuildSstables_CorruptSst verifies that a corrupt SST file (bad magic)
+// causes rebuildSstables to return a non-nil error wrapping ErrBadFile.
+func TestRebuildSstables_CorruptSst(t *testing.T) {
+	setupTestDir(t)
+	crcTab := crc32.MakeTable(crc32.Castagnoli)
+
+	writeSyntheticSST(t, 0, 1, []testEntry{{key: "k", value: []byte("v"), seq: 1}}, crcTab)
+
+	// Corrupt the magic bytes (last 8 bytes of the file).
+	fi, err := os.Stat("data/sstables/level-0/1.sst")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile("data/sstables/level-0/1.sst", os.O_RDWR, 0644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteAt([]byte{0, 0, 0, 0, 0, 0, 0, 0}, fi.Size()-8); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	_, _, _, err = rebuildSstables(4096, 10, crcTab)
+	if err == nil {
+		t.Fatal("expected error for corrupt SST, got nil")
+	}
+	if !strings.Contains(err.Error(), ErrBadFile.Error()) {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+// TestRebuildSstables_RoundTrip_Reads writes SSTs, rebuilds from disk, then
+// verifies that ssts.get() returns correct values for known keys and
+// ErrKeyNotFound for an absent key.
+func TestRebuildSstables_RoundTrip_Reads(t *testing.T) {
+	setupTestDir(t)
+	crcTab := crc32.MakeTable(crc32.Castagnoli)
+
+	entriesA := []testEntry{
+		{key: "apple", value: []byte("red"), seq: 1},
+		{key: "banana", value: []byte("yellow"), seq: 2},
+	}
+	entriesB := []testEntry{
+		{key: "cherry", value: []byte("dark-red"), seq: 3},
+		{key: "date", value: []byte("brown"), seq: 4},
+	}
+	mA := newTestMemtable(t, entriesA)
+	mB := newTestMemtable(t, entriesB)
+	if _, err := newSstFromMemtable(1, mA, crcTab); err != nil {
+		t.Fatalf("newSstFromMemtable A: %v", err)
+	}
+	if _, err := newSstFromMemtable(2, mB, crcTab); err != nil {
+		t.Fatalf("newSstFromMemtable B: %v", err)
+	}
+
+	ssts, _, _, err := rebuildSstables(4096, 10, crcTab)
+	if err != nil {
+		t.Fatalf("rebuildSstables: %v", err)
+	}
+
+	// All written keys must be readable
+	for _, e := range append(entriesA, entriesB...) {
+		val, err := ssts.get(e.key)
+		if err != nil {
+			t.Errorf("get(%q): %v", e.key, err)
+		} else if string(val) != string(e.value) {
+			t.Errorf("get(%q) = %q, want %q", e.key, val, e.value)
+		}
+	}
+
+	// An absent key must return ErrKeyNotFound
+	if _, err := ssts.get("zucchini"); err != ErrKeyNotFound {
+		t.Errorf("get(\"zucchini\") = %v, want ErrKeyNotFound", err)
+	}
+}

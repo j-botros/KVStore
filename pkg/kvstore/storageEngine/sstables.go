@@ -988,6 +988,66 @@ func replaySst(fpath string, crcTable *crc32.Table) (*sst, error) {
 	}, nil
 }
 
+// rebuildSstables scans the data/sstables/ directory tree and reconstructs the
+// full in-memory sstables state from every SST file found on disk.
+//
+// It returns:
+//   - the rebuilt *sstables instance (with all levels populated and sorted)
+//   - maxSeq: the highest lastSeq seen across all SSTs (used by rebuildEngine
+//     to know which WAL entries still need to be replayed)
+//   - maxFilenum: the highest filenum seen (used to set nextFileNumber)
+//   - any I/O or parse error encountered
+func rebuildSstables(l0Capacity uint64, growthFactor int, crcTable *crc32.Table) (ssts *sstables, maxSeq uint64, maxFilenum uint64, err error) {
+	ssts = newSstables(l0Capacity, growthFactor, crcTable)
+
+	// Iterate through levels
+	for lvl := 0; ; lvl++ {
+		dir := fmt.Sprintf("data/sstables/level-%d", lvl)
+
+		entries, err := os.ReadDir(dir)
+		if os.IsNotExist(err) { // No more directories
+			break
+		} else if err != nil {
+			return nil, 0, 0, fmt.Errorf("rebuildSstables: reading %s: %w", dir, err)
+		}
+
+		// Ensure the levels slice is large enough for this level.
+		for len(ssts.levels) <= lvl {
+			// Each successive level has growthFactor * the previous level's capacity.
+			prevCapacity := ssts.levels[len(ssts.levels)-1].capacityBytes
+			ssts.levels = append(ssts.levels, newLevel(prevCapacity*uint64(growthFactor)))
+		}
+
+		lvlObj := ssts.levels[lvl]
+
+		for _, de := range entries {
+			if de.IsDir() || filepath.Ext(de.Name()) != ".sst" {
+				continue
+			}
+
+			fpath := filepath.Join(dir, de.Name())
+			s, err := replaySst(fpath, crcTable)
+			if err != nil {
+				return nil, 0, 0, fmt.Errorf("rebuildSstables: %w", err)
+			}
+
+			lvlObj.sstList = append(lvlObj.sstList, s)
+			lvlObj.sizeBytes += s.sizeBytes
+
+			if s.lastSeq > maxSeq {
+				maxSeq = s.lastSeq
+			}
+			if s.filenum > maxFilenum {
+				maxFilenum = s.filenum
+			}
+		}
+
+		lvlObj.sortByStartKey()
+	}
+
+	return ssts, maxSeq, maxFilenum, nil
+}
+
 type entry struct {
 	seq       uint64
 	tombstone bool
