@@ -258,3 +258,381 @@ func TestWriteLog_UpdatesLastSeq(t *testing.T) {
 		t.Errorf("lastSeq = %d, want 20 after second write", w.lastSeq)
 	}
 }
+
+/* ====================================================================================
+	REPLAY WAL TESTS
+==================================================================================== */
+
+// writeWalEntries is a test helper that writes a sequence of entries to a WAL
+// file at data/wal/<logNumber>.log using writeLog. The caller must have already
+// created the data/wal/ directory via setupTestDir + os.MkdirAll.
+func writeWalEntries(t *testing.T, logNumber uint64, entries []struct {
+	key       string
+	value     []byte
+	tombstone bool
+	seq       uint64
+}, crcTable *crc32.Table) {
+	t.Helper()
+	w := newWal(logNumber, crcTable)
+	for _, e := range entries {
+		if err := w.writeLog(e.key, e.value, e.tombstone, e.seq); err != nil {
+			t.Fatalf("writeLog(%q): %v", e.key, err)
+		}
+	}
+}
+
+// TestReplayWal_BadPath verifies that a filename that cannot be parsed as
+// "<N>.log" returns an error containing "could not parse logNumber".
+func TestReplayWal_BadPath(t *testing.T) {
+	setupTestDir(t)
+	crcTab := crc32.MakeTable(crc32.Castagnoli)
+
+	_, err := replayWal("data/wal/bad-name.log", 0, crcTab)
+	if err == nil {
+		t.Fatal("expected error for unparseable filename, got nil")
+	}
+	if !containsStr(err.Error(), "could not parse logNumber") {
+		t.Errorf("unexpected error message: %v", err)
+	}
+}
+
+// TestReplayWal_FileNotFound verifies that a well-formed path for a file that
+// does not exist returns a non-nil OS error.
+func TestReplayWal_FileNotFound(t *testing.T) {
+	setupTestDir(t)
+	crcTab := crc32.MakeTable(crc32.Castagnoli)
+	if err := os.MkdirAll("data/wal", 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	ml, err := replayWal("data/wal/99.log", 0, crcTab)
+	if err == nil {
+		t.Fatal("expected error for missing file, got nil")
+	}
+	if ml != nil {
+		t.Error("expected nil memlog on error")
+	}
+}
+
+// TestReplayWal_EmptyWal verifies that a zero-byte WAL file (engine created
+// the file but crashed before any write) produces an empty memlog with no error.
+func TestReplayWal_EmptyWal(t *testing.T) {
+	setupTestDir(t)
+	crcTab := crc32.MakeTable(crc32.Castagnoli)
+	if err := os.MkdirAll("data/wal", 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create an empty file
+	f, err := os.Create("data/wal/1.log")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	ml, err := replayWal("data/wal/1.log", 0, crcTab)
+	if err != nil {
+		t.Fatalf("replayWal: %v", err)
+	}
+	if ml.wal.logNumber != 1 {
+		t.Errorf("logNumber = %d, want 1", ml.wal.logNumber)
+	}
+	if ml.wal.lastSeq != 0 {
+		t.Errorf("lastSeq = %d, want 0", ml.wal.lastSeq)
+	}
+	if _, err := ml.memtable.get("any"); err != ErrKeyNotFound {
+		t.Errorf("expected empty memtable, got err=%v", err)
+	}
+}
+
+// TestReplayWal_SingleEntry_Replayed verifies that a single entry with
+// seq > maxSeqFromSsts is replayed into the memtable correctly.
+func TestReplayWal_SingleEntry_Replayed(t *testing.T) {
+	setupTestDir(t)
+	crcTab := crc32.MakeTable(crc32.Castagnoli)
+	if err := os.MkdirAll("data/wal", 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	writeWalEntries(t, 1, []struct {
+		key       string
+		value     []byte
+		tombstone bool
+		seq       uint64
+	}{
+		{"cat", []byte("meow"), false, 5},
+	}, crcTab)
+
+	ml, err := replayWal("data/wal/1.log", 0, crcTab)
+	if err != nil {
+		t.Fatalf("replayWal: %v", err)
+	}
+
+	if ml.wal.logNumber != 1 {
+		t.Errorf("logNumber = %d, want 1", ml.wal.logNumber)
+	}
+	if ml.wal.lastSeq != 5 {
+		t.Errorf("lastSeq = %d, want 5", ml.wal.lastSeq)
+	}
+	val, err := ml.memtable.get("cat")
+	if err != nil {
+		t.Fatalf("get(\"cat\"): %v", err)
+	}
+	if string(val) != "meow" {
+		t.Errorf("get(\"cat\") = %q, want \"meow\"", val)
+	}
+}
+
+// TestReplayWal_TombstoneEntry verifies that a tombstone entry is replayed as
+// a deletion: the key is present in the skip-list as a tombstone, so
+// memtable.get() returns ErrKeyNotFound.
+func TestReplayWal_TombstoneEntry(t *testing.T) {
+	setupTestDir(t)
+	crcTab := crc32.MakeTable(crc32.Castagnoli)
+	if err := os.MkdirAll("data/wal", 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	writeWalEntries(t, 1, []struct {
+		key       string
+		value     []byte
+		tombstone bool
+		seq       uint64
+	}{
+		{"dead", []byte{}, true, 3},
+	}, crcTab)
+
+	ml, err := replayWal("data/wal/1.log", 0, crcTab)
+	if err != nil {
+		t.Fatalf("replayWal: %v", err)
+	}
+
+	if ml.wal.lastSeq != 3 {
+		t.Errorf("lastSeq = %d, want 3", ml.wal.lastSeq)
+	}
+	if _, err := ml.memtable.get("dead"); err != ErrKeyNotFound {
+		t.Errorf("get(\"dead\") = %v, want ErrKeyNotFound (tombstone)", err)
+	}
+}
+
+// TestReplayWal_AllEntriesFiltered verifies that when all WAL entries have
+// seq <= maxSeqFromSsts, the returned memlog is empty.
+func TestReplayWal_AllEntriesFiltered(t *testing.T) {
+	setupTestDir(t)
+	crcTab := crc32.MakeTable(crc32.Castagnoli)
+	if err := os.MkdirAll("data/wal", 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	writeWalEntries(t, 1, []struct {
+		key       string
+		value     []byte
+		tombstone bool
+		seq       uint64
+	}{
+		{"k1", []byte("v1"), false, 1},
+		{"k2", []byte("v2"), false, 2},
+		{"k3", []byte("v3"), false, 3},
+	}, crcTab)
+
+	// maxSeqFromSsts is higher than all entries
+	ml, err := replayWal("data/wal/1.log", 5, crcTab)
+	if err != nil {
+		t.Fatalf("replayWal: %v", err)
+	}
+
+	if ml.wal.lastSeq != 0 {
+		t.Errorf("lastSeq = %d, want 0 (nothing replayed)", ml.wal.lastSeq)
+	}
+	for _, key := range []string{"k1", "k2", "k3"} {
+		if _, err := ml.memtable.get(key); err != ErrKeyNotFound {
+			t.Errorf("get(%q) = %v, want ErrKeyNotFound (all filtered)", key, err)
+		}
+	}
+}
+
+// TestReplayWal_PartialFilter verifies that only entries with seq > maxSeqFromSsts
+// are replayed; entries at or below the threshold are skipped.
+func TestReplayWal_PartialFilter(t *testing.T) {
+	setupTestDir(t)
+	crcTab := crc32.MakeTable(crc32.Castagnoli)
+	if err := os.MkdirAll("data/wal", 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	writeWalEntries(t, 1, []struct {
+		key       string
+		value     []byte
+		tombstone bool
+		seq       uint64
+	}{
+		{"k1", []byte("v1"), false, 1},  // seq 1 <= 5: filtered
+		{"k2", []byte("v2"), false, 5},  // seq 5 <= 5: filtered
+		{"k3", []byte("v3"), false, 10}, // seq 10 > 5: replayed
+	}, crcTab)
+
+	ml, err := replayWal("data/wal/1.log", 5, crcTab)
+	if err != nil {
+		t.Fatalf("replayWal: %v", err)
+	}
+
+	if _, err := ml.memtable.get("k1"); err != ErrKeyNotFound {
+		t.Errorf("get(\"k1\") = %v, want ErrKeyNotFound (filtered, seq=1)", err)
+	}
+	if _, err := ml.memtable.get("k2"); err != ErrKeyNotFound {
+		t.Errorf("get(\"k2\") = %v, want ErrKeyNotFound (filtered, seq=5)", err)
+	}
+	val, err := ml.memtable.get("k3")
+	if err != nil {
+		t.Fatalf("get(\"k3\"): %v", err)
+	}
+	if string(val) != "v3" {
+		t.Errorf("get(\"k3\") = %q, want \"v3\"", val)
+	}
+	if ml.wal.lastSeq != 10 {
+		t.Errorf("lastSeq = %d, want 10", ml.wal.lastSeq)
+	}
+}
+
+// TestReplayWal_LogNumberPreserved verifies that the logNumber parsed from the
+// filename is reflected in the returned memlog, regardless of file contents.
+func TestReplayWal_LogNumberPreserved(t *testing.T) {
+	setupTestDir(t)
+	crcTab := crc32.MakeTable(crc32.Castagnoli)
+	if err := os.MkdirAll("data/wal", 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	writeWalEntries(t, 42, []struct {
+		key       string
+		value     []byte
+		tombstone bool
+		seq       uint64
+	}{
+		{"k", []byte("v"), false, 1},
+	}, crcTab)
+
+	ml, err := replayWal("data/wal/42.log", 0, crcTab)
+	if err != nil {
+		t.Fatalf("replayWal: %v", err)
+	}
+	if ml.wal.logNumber != 42 {
+		t.Errorf("logNumber = %d, want 42", ml.wal.logNumber)
+	}
+}
+
+// TestReplayWal_CorruptTailEntry verifies that a truncated/corrupt entry at the
+// end of the WAL (simulating a crash mid-write) is silently ignored, while any
+// complete entries before it are still replayed.
+func TestReplayWal_CorruptTailEntry(t *testing.T) {
+	setupTestDir(t)
+	crcTab := crc32.MakeTable(crc32.Castagnoli)
+	if err := os.MkdirAll("data/wal", 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write one complete, valid entry
+	writeWalEntries(t, 1, []struct {
+		key       string
+		value     []byte
+		tombstone bool
+		seq       uint64
+	}{
+		{"good", []byte("data"), false, 1},
+	}, crcTab)
+
+	// Append garbage bytes to simulate a partial write
+	f, err := os.OpenFile("data/wal/1.log", os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Write([]byte{0xDE, 0xAD, 0xBE, 0xEF, 0x00}); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	ml, err := replayWal("data/wal/1.log", 0, crcTab)
+	if err != nil {
+		t.Fatalf("replayWal: %v", err)
+	}
+
+	val, err := ml.memtable.get("good")
+	if err != nil {
+		t.Fatalf("get(\"good\"): %v (complete entry before corrupt tail should be replayed)", err)
+	}
+	if string(val) != "data" {
+		t.Errorf("get(\"good\") = %q, want \"data\"", val)
+	}
+	if ml.wal.lastSeq != 1 {
+		t.Errorf("lastSeq = %d, want 1", ml.wal.lastSeq)
+	}
+}
+
+// TestReplayWal_RoundTrip writes a realistic sequence of entries via writeLog,
+// then replays them with replayWal and verifies every key has the correct value.
+func TestReplayWal_RoundTrip(t *testing.T) {
+	setupTestDir(t)
+	crcTab := crc32.MakeTable(crc32.Castagnoli)
+	if err := os.MkdirAll("data/wal", 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	writeWalEntries(t, 1, []struct {
+		key       string
+		value     []byte
+		tombstone bool
+		seq       uint64
+	}{
+		{"a", []byte("va"), false, 1},
+		{"b", []byte("vb"), false, 2},
+		{"c", []byte{}, true, 3},  // tombstone
+		{"d", []byte("vd"), false, 4},
+	}, crcTab)
+
+	ml, err := replayWal("data/wal/1.log", 0, crcTab)
+	if err != nil {
+		t.Fatalf("replayWal: %v", err)
+	}
+
+	if ml.wal.lastSeq != 4 {
+		t.Errorf("lastSeq = %d, want 4", ml.wal.lastSeq)
+	}
+
+	cases := []struct {
+		key     string
+		want    string
+		deleted bool
+	}{
+		{"a", "va", false},
+		{"b", "vb", false},
+		{"c", "", true},  // tombstoned
+		{"d", "vd", false},
+	}
+	for _, tc := range cases {
+		val, err := ml.memtable.get(tc.key)
+		if tc.deleted {
+			if err != ErrKeyNotFound {
+				t.Errorf("get(%q) = %v, want ErrKeyNotFound (tombstone)", tc.key, err)
+			}
+		} else {
+			if err != nil {
+				t.Errorf("get(%q): %v", tc.key, err)
+			} else if string(val) != tc.want {
+				t.Errorf("get(%q) = %q, want %q", tc.key, val, tc.want)
+			}
+		}
+	}
+}
+
+// containsStr is a local helper to avoid importing strings in wal_test.go.
+func containsStr(s, substr string) bool {
+	return len(s) >= len(substr) && (s == substr || len(substr) == 0 ||
+		func() bool {
+			for i := 0; i <= len(s)-len(substr); i++ {
+				if s[i:i+len(substr)] == substr {
+					return true
+				}
+			}
+			return false
+		}())
+}

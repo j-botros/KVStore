@@ -7,6 +7,9 @@ import (
 	"hash/crc32"
 	"io"
 	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
 )
 
 type wal struct {
@@ -87,4 +90,60 @@ func (wal *wal) writeLog(key string, value []byte, tombstone bool, seq uint64) e
 
 	wal.lastSeq = seq
 	return nil
+}
+
+// replayWal recovers MemTable and WAL Metadata from a WAL
+func replayWal(fpath string, maxSeqFromSsts uint64, crcTable *crc32.Table) (*memlog, error) {
+	// --- Parse logNumber from filename: "data/wal/<N>.log" ---
+	base := filepath.Base(fpath)
+	numStr := strings.TrimSuffix(base, ".log")
+	logNumber, err := strconv.ParseUint(numStr, 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf("replayWal: could not parse logNumber from %q: %w", fpath, err)
+	}
+
+	// --- Open WAL file ---
+	walFile, err := os.Open(fpath)
+	if err != nil {
+		return nil, err
+	}
+	defer walFile.Close()
+
+	fi, err := walFile.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("replayWal %q: stat: %w", fpath, err)
+	}
+
+	// --- Replay entries into a fresh memlog ---
+	ml := newMemlog(logNumber, crcTable)
+
+	// readEntry expects an *io.SectionReader; wrap the whole file in one.
+	r := io.NewSectionReader(walFile, 0, fi.Size())
+	for {
+		e, err := readEntry(r, crcTable)
+		if err == ErrEntryNotFound {
+			break // clean EOF
+		} else if err != nil {
+			// A partial write at the tail (crash mid-write) is possible.
+			// Treat any decode/checksum error at this point as end-of-log.
+			break
+		}
+
+		// Skip entries already persisted in SSTs.
+		if e.seq <= maxSeqFromSsts {
+			continue
+		}
+
+		if e.tombstone {
+			ml.memtable.delete(e.key, e.seq)
+		} else {
+			ml.memtable.insert(e.key, e.value, e.seq)
+		}
+
+		if e.seq > ml.wal.lastSeq {
+			ml.wal.lastSeq = e.seq
+		}
+	}
+
+	return ml, nil
 }
