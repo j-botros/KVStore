@@ -34,12 +34,15 @@ func main() {
 		log.Fatalf("Invalid configuration: level_size_multiplier must be greater than 1")
 	}
 
-	engine := storageengine.NewStorageEngine(
+	engine, err := storageengine.OpenStorageEngine(
 		config.storage.memtableSizeMb*1024*1024,
 		config.storage.sstSizeMb*1024*1024,
 		config.storage.l0SizeMb*1024*1024,
 		config.storage.lvlGrowthFactor,
 	)
+	if err != nil {
+		log.Fatalf("Failed to open storage engine: %v", err)
+	}
 
 	service := service.NewService(engine)
 

@@ -27,7 +27,7 @@ type StorageEngine struct {
 	compacting atomic.Bool  // serializes Compact; allows concurrent Flush calls
 }
 
-func NewStorageEngine(memCapacity uint64, sstCapacity uint64, l0Capacity uint64, growthFactor int) *StorageEngine {
+func newStorageEngine(memCapacity uint64, sstCapacity uint64, l0Capacity uint64, growthFactor int) *StorageEngine {
 	crcTable := crc32.MakeTable(crc32.Castagnoli)
 
 	nextFileNumber := uint64(0)
@@ -48,6 +48,25 @@ func NewStorageEngine(memCapacity uint64, sstCapacity uint64, l0Capacity uint64,
 
 		// mu and compacting are ready to use with their zero values (unlocked and false)
 	}
+}
+
+// OpenStorageEngine is the primary entry point for server startup. If a data/
+// directory already exists on disk it calls rebuildEngine to recover prior
+// state; otherwise it calls newStorageEngine for a clean start. The caller
+// should always use this instead of newStorageEngine directly.
+func OpenStorageEngine(memCapacity uint64, sstCapacity uint64, l0Capacity uint64, growthFactor int) (*StorageEngine, error) {
+	_, err := os.Stat("data")
+	if err != nil && !os.IsNotExist(err) {
+		return nil, fmt.Errorf("OpenStorageEngine: stat data dir: %w", err)
+	}
+
+	if os.IsNotExist(err) {
+		// First run — no prior state.
+		return newStorageEngine(memCapacity, sstCapacity, l0Capacity, growthFactor), nil
+	}
+
+	// Existing data directory found — attempt recovery.
+	return rebuildEngine(memCapacity, sstCapacity, l0Capacity, growthFactor)
 }
 
 func rebuildEngine(memCapacity uint64, sstCapacity uint64, l0Capacity uint64, growthFactor int) (*StorageEngine, error) {
