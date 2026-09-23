@@ -981,3 +981,259 @@ func TestRebuildEngine_RoundTrip(t *testing.T) {
 		t.Errorf("Get(\"newkey\") = %q, want \"newval\"", val)
 	}
 }
+
+/* ====================================================================================
+	OPEN STORAGE ENGINE TESTS
+==================================================================================== */
+
+const (
+	openMemCap     = uint64(64 * 1024 * 1024)
+	openSstCap     = uint64(64 * 1024 * 1024)
+	openL0Cap      = uint64(4096)
+	openGrowthFact = 10
+)
+
+// TestOpenStorageEngine_NoDataDir_FreshEngine verifies that when no data/
+// directory exists, OpenStorageEngine returns a clean, usable engine.
+func TestOpenStorageEngine_NoDataDir_FreshEngine(t *testing.T) {
+	setupTestDir(t)
+	// No data/ directory created — first-run path.
+
+	e, err := OpenStorageEngine(openMemCap, openSstCap, openL0Cap, openGrowthFact)
+	if err != nil {
+		t.Fatalf("OpenStorageEngine: %v", err)
+	}
+	if e == nil {
+		t.Fatal("returned engine is nil")
+	}
+	if e.active == nil {
+		t.Fatal("active memlog is nil")
+	}
+	if e.nextSeq != 0 {
+		t.Errorf("nextSeq = %d, want 0 on fresh engine", e.nextSeq)
+	}
+	if _, err := e.Get("any"); err != ErrKeyNotFound {
+		t.Errorf("Get(\"any\") = %v, want ErrKeyNotFound", err)
+	}
+}
+
+// TestOpenStorageEngine_EmptyDataDir_FreshEngine verifies that an empty data/
+// directory (no subdirs) routes to rebuildEngine and returns a valid engine
+// with no stored data.
+func TestOpenStorageEngine_EmptyDataDir_FreshEngine(t *testing.T) {
+	setupTestDir(t)
+	if err := os.Mkdir("data", 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	e, err := OpenStorageEngine(openMemCap, openSstCap, openL0Cap, openGrowthFact)
+	if err != nil {
+		t.Fatalf("OpenStorageEngine: %v", err)
+	}
+	if e.active == nil {
+		t.Fatal("active memlog is nil")
+	}
+	if len(e.immutables) != 0 {
+		t.Errorf("immutables len = %d, want 0", len(e.immutables))
+	}
+	if _, err := e.Get("any"); err != ErrKeyNotFound {
+		t.Errorf("Get(\"any\") = %v, want ErrKeyNotFound", err)
+	}
+}
+
+// TestOpenStorageEngine_WalOnly_RecoverData verifies recovery when only a WAL
+// exists (nothing flushed to SSTs).
+func TestOpenStorageEngine_WalOnly_RecoverData(t *testing.T) {
+	live := newTestEngine(t)
+	keys := []string{"dog", "cat", "fish"}
+	for _, k := range keys {
+		if err := live.Put(k, []byte("v:"+k)); err != nil {
+			t.Fatalf("Put(%q): %v", k, err)
+		}
+	}
+	lastWrittenSeq := live.nextSeq - 1
+	live = nil // simulate crash
+
+	e, err := OpenStorageEngine(openMemCap, openSstCap, openL0Cap, openGrowthFact)
+	if err != nil {
+		t.Fatalf("OpenStorageEngine: %v", err)
+	}
+	for _, k := range keys {
+		val, err := e.Get(k)
+		if err != nil {
+			t.Errorf("Get(%q): %v", k, err)
+		} else if string(val) != "v:"+k {
+			t.Errorf("Get(%q) = %q, want %q", k, val, "v:"+k)
+		}
+	}
+	if e.nextSeq <= lastWrittenSeq {
+		t.Errorf("nextSeq = %d, want > %d", e.nextSeq, lastWrittenSeq)
+	}
+}
+
+// TestOpenStorageEngine_SstAndWal_RecoverData verifies recovery when some keys
+// are in SSTs (flushed) and others are only in the WAL (unflushed).
+func TestOpenStorageEngine_SstAndWal_RecoverData(t *testing.T) {
+	live := newTestEngine(t)
+
+	batchA := []string{"aa", "ab", "ac"}
+	for _, k := range batchA {
+		if err := live.Put(k, []byte("sst:"+k)); err != nil {
+			t.Fatalf("Put(%q): %v", k, err)
+		}
+	}
+	if err := live.flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+
+	batchB := []string{"ba", "bb", "bc"}
+	for _, k := range batchB {
+		if err := live.Put(k, []byte("wal:"+k)); err != nil {
+			t.Fatalf("Put(%q): %v", k, err)
+		}
+	}
+	live = nil // simulate crash
+
+	e, err := OpenStorageEngine(openMemCap, openSstCap, openL0Cap, openGrowthFact)
+	if err != nil {
+		t.Fatalf("OpenStorageEngine: %v", err)
+	}
+	for _, k := range batchA {
+		val, err := e.Get(k)
+		if err != nil {
+			t.Errorf("Get(%q) from SST: %v", k, err)
+		} else if string(val) != "sst:"+k {
+			t.Errorf("Get(%q) = %q, want %q", k, val, "sst:"+k)
+		}
+	}
+	for _, k := range batchB {
+		val, err := e.Get(k)
+		if err != nil {
+			t.Errorf("Get(%q) from WAL: %v", k, err)
+		} else if string(val) != "wal:"+k {
+			t.Errorf("Get(%q) = %q, want %q", k, val, "wal:"+k)
+		}
+	}
+}
+
+// TestOpenStorageEngine_FreshEngine_IsOperational verifies that a fresh engine
+// (no data/ dir) accepts writes and returns correct values.
+func TestOpenStorageEngine_FreshEngine_IsOperational(t *testing.T) {
+	setupTestDir(t)
+
+	e, err := OpenStorageEngine(openMemCap, openSstCap, openL0Cap, openGrowthFact)
+	if err != nil {
+		t.Fatalf("OpenStorageEngine: %v", err)
+	}
+	if err := os.MkdirAll("data/wal", 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.Put("hello", []byte("world")); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	val, err := e.Get("hello")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if string(val) != "world" {
+		t.Errorf("Get(\"hello\") = %q, want \"world\"", val)
+	}
+}
+
+// TestOpenStorageEngine_RecoveredEngine_IsOperational verifies that after
+// recovery, the engine accepts new writes without seq or filenum collisions,
+// and that a subsequent flush succeeds.
+func TestOpenStorageEngine_RecoveredEngine_IsOperational(t *testing.T) {
+	live := newTestEngine(t)
+	if err := live.Put("existing", []byte("data")); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if err := live.flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	seqBeforeCrash := live.nextSeq - 1
+	filenumBeforeCrash := live.nextFileNumber - 1
+	live = nil // simulate crash
+
+	e, err := OpenStorageEngine(openMemCap, openSstCap, openL0Cap, openGrowthFact)
+	if err != nil {
+		t.Fatalf("OpenStorageEngine: %v", err)
+	}
+	// Counters must be strictly greater than anything on disk.
+	if e.nextSeq <= seqBeforeCrash {
+		t.Errorf("nextSeq = %d, want > %d", e.nextSeq, seqBeforeCrash)
+	}
+	if e.nextFileNumber <= filenumBeforeCrash {
+		t.Errorf("nextFileNumber = %d, want > %d", e.nextFileNumber, filenumBeforeCrash)
+	}
+	// New writes and flush must succeed without panic or error.
+	if err := e.Put("newkey", []byte("newval")); err != nil {
+		t.Fatalf("Put after recovery: %v", err)
+	}
+	if err := e.flush(); err != nil {
+		t.Fatalf("flush after recovery: %v", err)
+	}
+	val, err := e.Get("newkey")
+	if err != nil {
+		t.Fatalf("Get after recovery: %v", err)
+	}
+	if string(val) != "newval" {
+		t.Errorf("Get(\"newkey\") = %q, want \"newval\"", val)
+	}
+}
+
+// TestOpenStorageEngine_StatError_ReturnsError verifies that errors encountered
+// during recovery are propagated back as a non-nil error. We create data/ as a
+// regular file (not a directory) so that rebuildEngine's os.ReadDir calls fail.
+func TestOpenStorageEngine_StatError_ReturnsError(t *testing.T) {
+	setupTestDir(t)
+	// Create data as a file, not a directory — os.Stat succeeds (no IsNotExist),
+	// so OpenStorageEngine routes to rebuildEngine, which then fails when it
+	// tries to ReadDir("data/sstables").
+	if err := os.WriteFile("data", []byte("not a directory"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	e, err := OpenStorageEngine(openMemCap, openSstCap, openL0Cap, openGrowthFact)
+	if err == nil {
+		t.Fatal("expected non-nil error when data/ is a file, got nil")
+	}
+	if e != nil {
+		t.Errorf("expected nil engine on error, got non-nil")
+	}
+}
+
+// TestOpenStorageEngine_Idempotent_MultipleOpens verifies that opening the
+// engine twice on the same data directory (clean shutdown between opens)
+// correctly recovers flushed data on the second open.
+func TestOpenStorageEngine_Idempotent_MultipleOpens(t *testing.T) {
+	// First open: fresh engine, write + flush.
+	setupTestDir(t)
+	e1, err := OpenStorageEngine(openMemCap, openSstCap, openL0Cap, openGrowthFact)
+	if err != nil {
+		t.Fatalf("first OpenStorageEngine: %v", err)
+	}
+	if err := os.MkdirAll("data/wal", 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := e1.Put("city", []byte("austin")); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if err := e1.flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	e1 = nil // clean shutdown
+
+	// Second open: data/ now exists, should recover the flushed SST.
+	e2, err := OpenStorageEngine(openMemCap, openSstCap, openL0Cap, openGrowthFact)
+	if err != nil {
+		t.Fatalf("second OpenStorageEngine: %v", err)
+	}
+	val, err := e2.Get("city")
+	if err != nil {
+		t.Fatalf("Get after second open: %v", err)
+	}
+	if string(val) != "austin" {
+		t.Errorf("Get(\"city\") = %q, want \"austin\"", val)
+	}
+}
