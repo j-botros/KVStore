@@ -2,6 +2,7 @@ package storageengine
 
 import (
 	"fmt"
+	"hash/crc32"
 	"os"
 	"sync"
 	"testing"
@@ -597,5 +598,386 @@ func TestStorageEngine_AutoFlush_MultipleEntries(t *testing.T) {
 		} else if string(val) != want {
 			t.Errorf("Get(%q) = %q, want %q", k, val, want)
 		}
+	}
+}
+
+/* ====================================================================================
+	REBUILD ENGINE TESTS
+==================================================================================== */
+
+const (
+	rebuildMemCap     = uint64(64 * 1024 * 1024)
+	rebuildSstCap     = uint64(64 * 1024 * 1024)
+	rebuildL0Cap      = uint64(4096)
+	rebuildGrowthFact = 10
+)
+
+// TestRebuildEngine_EmptyDataDir verifies that rebuildEngine succeeds on a
+// completely fresh environment where no data/ directory exists.
+func TestRebuildEngine_EmptyDataDir(t *testing.T) {
+	setupTestDir(t)
+
+	e, err := rebuildEngine(rebuildMemCap, rebuildSstCap, rebuildL0Cap, rebuildGrowthFact)
+	if err != nil {
+		t.Fatalf("rebuildEngine: %v", err)
+	}
+	if e.active == nil {
+		t.Fatal("active memlog is nil")
+	}
+	// maxSstFilenum=0 → newLogNum=1; nextFileNumber=newLogNum+1=2
+	if e.active.wal.logNumber != 1 {
+		t.Errorf("active.wal.logNumber = %d, want 1", e.active.wal.logNumber)
+	}
+	if len(e.immutables) != 0 {
+		t.Errorf("immutables len = %d, want 0", len(e.immutables))
+	}
+	if e.nextSeq != 1 {
+		t.Errorf("nextSeq = %d, want 1", e.nextSeq)
+	}
+	if e.nextFileNumber != 2 {
+		t.Errorf("nextFileNumber = %d, want 2 (one past active logNumber=1)", e.nextFileNumber)
+	}
+	if _, err := e.Get("any"); err != ErrKeyNotFound {
+		t.Errorf("Get(\"any\") = %v, want ErrKeyNotFound on empty engine", err)
+	}
+}
+
+// TestRebuildEngine_SstOnly_NoWal verifies recovery when SSTs exist but the
+// WAL directory has been deleted (all memtables fully flushed before crash).
+func TestRebuildEngine_SstOnly_NoWal(t *testing.T) {
+	live := newTestEngine(t)
+	keys := []string{"apple", "banana", "cherry"}
+	for _, k := range keys {
+		if err := live.Put(k, []byte("v:"+k)); err != nil {
+			t.Fatalf("Put(%q): %v", k, err)
+		}
+	}
+	if err := live.flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+
+	// Simulate "WAL deleted after flush".
+	if err := os.RemoveAll("data/wal"); err != nil {
+		t.Fatalf("RemoveAll data/wal: %v", err)
+	}
+
+	e, err := rebuildEngine(rebuildMemCap, rebuildSstCap, rebuildL0Cap, rebuildGrowthFact)
+	if err != nil {
+		t.Fatalf("rebuildEngine: %v", err)
+	}
+	if len(e.immutables) != 0 {
+		t.Errorf("immutables len = %d, want 0", len(e.immutables))
+	}
+	for _, k := range keys {
+		val, err := e.Get(k)
+		if err != nil {
+			t.Errorf("Get(%q): %v", k, err)
+		} else if string(val) != "v:"+k {
+			t.Errorf("Get(%q) = %q, want %q", k, val, "v:"+k)
+		}
+	}
+}
+
+// TestRebuildEngine_WalOnly_NoSst verifies recovery when only a WAL exists
+// and nothing has been flushed to SSTs.
+func TestRebuildEngine_WalOnly_NoSst(t *testing.T) {
+	live := newTestEngine(t)
+	keys := []string{"dog", "cat", "fish"}
+	for _, k := range keys {
+		if err := live.Put(k, []byte("v:"+k)); err != nil {
+			t.Fatalf("Put(%q): %v", k, err)
+		}
+	}
+	// Deliberate: no flush.
+	lastWrittenSeq := live.nextSeq - 1
+
+	e, err := rebuildEngine(rebuildMemCap, rebuildSstCap, rebuildL0Cap, rebuildGrowthFact)
+	if err != nil {
+		t.Fatalf("rebuildEngine: %v", err)
+	}
+	if len(e.immutables) != 0 {
+		t.Errorf("immutables len = %d, want 0 (one WAL → active only)", len(e.immutables))
+	}
+	for _, k := range keys {
+		val, err := e.Get(k)
+		if err != nil {
+			t.Errorf("Get(%q): %v", k, err)
+		} else if string(val) != "v:"+k {
+			t.Errorf("Get(%q) = %q, want %q", k, val, "v:"+k)
+		}
+	}
+	if e.nextSeq <= lastWrittenSeq {
+		t.Errorf("nextSeq = %d, want > %d", e.nextSeq, lastWrittenSeq)
+	}
+}
+
+// TestRebuildEngine_SstAndWal verifies recovery when some keys are in SSTs
+// (flushed) and others are only in the WAL (unflushed), and that WAL entries
+// already covered by SSTs are not double-counted.
+func TestRebuildEngine_SstAndWal(t *testing.T) {
+	live := newTestEngine(t)
+
+	batchA := []string{"aa", "ab", "ac"}
+	for _, k := range batchA {
+		if err := live.Put(k, []byte("sst:"+k)); err != nil {
+			t.Fatalf("Put(%q): %v", k, err)
+		}
+	}
+	if err := live.flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+
+	batchB := []string{"ba", "bb", "bc"}
+	for _, k := range batchB {
+		if err := live.Put(k, []byte("wal:"+k)); err != nil {
+			t.Fatalf("Put(%q): %v", k, err)
+		}
+	}
+
+	e, err := rebuildEngine(rebuildMemCap, rebuildSstCap, rebuildL0Cap, rebuildGrowthFact)
+	if err != nil {
+		t.Fatalf("rebuildEngine: %v", err)
+	}
+	for _, k := range batchA {
+		val, err := e.Get(k)
+		if err != nil {
+			t.Errorf("Get(%q) from SST: %v", k, err)
+		} else if string(val) != "sst:"+k {
+			t.Errorf("Get(%q) = %q, want %q", k, val, "sst:"+k)
+		}
+	}
+	for _, k := range batchB {
+		val, err := e.Get(k)
+		if err != nil {
+			t.Errorf("Get(%q) from WAL: %v", k, err)
+		} else if string(val) != "wal:"+k {
+			t.Errorf("Get(%q) = %q, want %q", k, val, "wal:"+k)
+		}
+	}
+}
+
+// TestRebuildEngine_NextSeqIsStrictlyGreater verifies that nextSeq is always
+// strictly greater than the maximum seq seen across SSTs and WALs.
+func TestRebuildEngine_NextSeqIsStrictlyGreater(t *testing.T) {
+	live := newTestEngine(t)
+	for _, k := range []string{"p", "q", "r", "s"} {
+		live.Put(k, []byte(k))
+	}
+	if err := live.flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	live.Put("t", []byte("t"))
+	live.Put("u", []byte("u"))
+	lastSeqBeforeCrash := live.nextSeq - 1
+
+	e, err := rebuildEngine(rebuildMemCap, rebuildSstCap, rebuildL0Cap, rebuildGrowthFact)
+	if err != nil {
+		t.Fatalf("rebuildEngine: %v", err)
+	}
+	if e.nextSeq <= lastSeqBeforeCrash {
+		t.Errorf("nextSeq = %d, want > %d (last seq on disk)", e.nextSeq, lastSeqBeforeCrash)
+	}
+}
+
+// TestRebuildEngine_NextFileNumberIsStrictlyGreater verifies that
+// nextFileNumber is strictly greater than every filenum seen on disk.
+func TestRebuildEngine_NextFileNumberIsStrictlyGreater(t *testing.T) {
+	live := newTestEngine(t)
+	for i := 0; i < 3; i++ {
+		live.Put(fmt.Sprintf("key%d", i), []byte("v"))
+		if err := live.flush(); err != nil {
+			t.Fatalf("flush %d: %v", i, err)
+		}
+	}
+	lastFilenumBeforeCrash := live.nextFileNumber - 1
+
+	e, err := rebuildEngine(rebuildMemCap, rebuildSstCap, rebuildL0Cap, rebuildGrowthFact)
+	if err != nil {
+		t.Fatalf("rebuildEngine: %v", err)
+	}
+	if e.nextFileNumber <= lastFilenumBeforeCrash {
+		t.Errorf("nextFileNumber = %d, want > %d", e.nextFileNumber, lastFilenumBeforeCrash)
+	}
+}
+
+// TestRebuildEngine_MultipleWals_ImmutableOrder verifies that when multiple
+// WAL files exist on disk (e.g. after crash before any flush), all but the
+// newest become immutables in ascending logNumber order, and all keys are readable.
+func TestRebuildEngine_MultipleWals_ImmutableOrder(t *testing.T) {
+	// Build the on-disk state manually: three WAL files with disjoint key sets,
+	// simulating a crash that left multiple unflushed WALs.
+	setupTestDir(t)
+	if err := os.MkdirAll("data/wal", 0755); err != nil {
+		t.Fatal(err)
+	}
+	crcTab := crc32.MakeTable(crc32.Castagnoli)
+
+	walEntries := []struct {
+		logNum uint64
+		key    string
+		val    string
+	}{
+		{1, "w0", "v0"},
+		{2, "w1", "v1"},
+		{3, "w2", "v2"},
+	}
+	for _, e := range walEntries {
+		w := newWal(e.logNum, crcTab)
+		if err := w.writeLog(e.key, []byte(e.val), false, e.logNum); err != nil {
+			t.Fatalf("writeLog(%q): %v", e.key, err)
+		}
+	}
+
+	e, err := rebuildEngine(rebuildMemCap, rebuildSstCap, rebuildL0Cap, rebuildGrowthFact)
+	if err != nil {
+		t.Fatalf("rebuildEngine: %v", err)
+	}
+	if len(e.immutables) != 2 {
+		t.Errorf("immutables len = %d, want 2", len(e.immutables))
+	}
+	if len(e.immutables) == 2 {
+		i0 := e.immutables[0].wal.logNumber
+		i1 := e.immutables[1].wal.logNumber
+		act := e.active.wal.logNumber
+		if !(i0 < i1 && i1 < act) {
+			t.Errorf("logNumber order wrong: imm[0]=%d imm[1]=%d active=%d; want ascending", i0, i1, act)
+		}
+	}
+	for _, we := range walEntries {
+		val, err := e.Get(we.key)
+		if err != nil {
+			t.Errorf("Get(%q): %v", we.key, err)
+		} else if string(val) != we.val {
+			t.Errorf("Get(%q) = %q, want %q", we.key, val, we.val)
+		}
+	}
+}
+
+// TestRebuildEngine_NonLogFilesIgnored verifies that non-<N>.log files inside
+// data/wal/ are silently skipped without causing an error.
+func TestRebuildEngine_NonLogFilesIgnored(t *testing.T) {
+	live := newTestEngine(t)
+	live.Put("realkey", []byte("realval"))
+	// No flush — one valid WAL file exists.
+
+	os.WriteFile("data/wal/notes.txt", []byte("junk"), 0644)
+	os.WriteFile("data/wal/bad-name.log", []byte("junk"), 0644)
+	os.Mkdir("data/wal/subdir", 0755)
+
+	e, err := rebuildEngine(rebuildMemCap, rebuildSstCap, rebuildL0Cap, rebuildGrowthFact)
+	if err != nil {
+		t.Fatalf("rebuildEngine: %v", err)
+	}
+	if len(e.immutables) != 0 {
+		t.Errorf("immutables len = %d, want 0 (non-.log files must be ignored)", len(e.immutables))
+	}
+	val, err := e.Get("realkey")
+	if err != nil {
+		t.Errorf("Get(\"realkey\"): %v", err)
+	} else if string(val) != "realval" {
+		t.Errorf("Get(\"realkey\") = %q, want \"realval\"", val)
+	}
+}
+
+// TestRebuildEngine_CorruptSst verifies that a corrupt SST (zeroed magic bytes)
+// causes rebuildEngine to return a non-nil error.
+func TestRebuildEngine_CorruptSst(t *testing.T) {
+	live := newTestEngine(t)
+	live.Put("k", []byte("v"))
+	if err := live.flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+
+	// Find the SST via the live engine's sstables rather than guessing the filenum.
+	live.sstables.mu.RLock()
+	if len(live.sstables.levels[0].sstList) == 0 {
+		live.sstables.mu.RUnlock()
+		t.Fatal("expected at least one SST in L0 after flush")
+	}
+	sstFilenum := live.sstables.levels[0].sstList[0].filenum
+	live.sstables.mu.RUnlock()
+
+	sstPath := fmt.Sprintf("data/sstables/level-0/%d.sst", sstFilenum)
+	fi, err := os.Stat(sstPath)
+	if err != nil {
+		t.Fatalf("stat SST: %v", err)
+	}
+	f, err := os.OpenFile(sstPath, os.O_RDWR, 0644)
+	if err != nil {
+		t.Fatalf("open SST: %v", err)
+	}
+	f.WriteAt([]byte{0, 0, 0, 0, 0, 0, 0, 0}, fi.Size()-8)
+	f.Close()
+
+	_, err = rebuildEngine(rebuildMemCap, rebuildSstCap, rebuildL0Cap, rebuildGrowthFact)
+	if err == nil {
+		t.Fatal("expected error for corrupt SST, got nil")
+	}
+}
+
+// TestRebuildEngine_RoundTrip is the primary end-to-end recovery test:
+// write → simulate crash → rebuild → verify all reads → confirm the
+// recovered engine accepts new writes without seq/filenum collisions.
+func TestRebuildEngine_RoundTrip(t *testing.T) {
+	live := newTestEngine(t)
+
+	batchA := map[string]string{"city": "austin", "state": "texas", "country": "usa"}
+	for k, v := range batchA {
+		if err := live.Put(k, []byte(v)); err != nil {
+			t.Fatalf("Put(%q): %v", k, err)
+		}
+	}
+	if err := live.flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+
+	batchB := map[string]string{"river": "colorado", "lake": "travis"}
+	for k, v := range batchB {
+		if err := live.Put(k, []byte(v)); err != nil {
+			t.Fatalf("Put(%q): %v", k, err)
+		}
+	}
+	seqBeforeCrash := live.nextSeq - 1
+	filenumBeforeCrash := live.nextFileNumber - 1
+	live = nil // simulate crash
+
+	e, err := rebuildEngine(rebuildMemCap, rebuildSstCap, rebuildL0Cap, rebuildGrowthFact)
+	if err != nil {
+		t.Fatalf("rebuildEngine: %v", err)
+	}
+
+	for k, want := range batchA {
+		val, err := e.Get(k)
+		if err != nil {
+			t.Errorf("Get(%q) from SST: %v", k, err)
+		} else if string(val) != want {
+			t.Errorf("Get(%q) = %q, want %q", k, val, want)
+		}
+	}
+	for k, want := range batchB {
+		val, err := e.Get(k)
+		if err != nil {
+			t.Errorf("Get(%q) from WAL: %v", k, err)
+		} else if string(val) != want {
+			t.Errorf("Get(%q) = %q, want %q", k, val, want)
+		}
+	}
+	if e.nextSeq <= seqBeforeCrash {
+		t.Errorf("nextSeq = %d, want > %d", e.nextSeq, seqBeforeCrash)
+	}
+	if e.nextFileNumber <= filenumBeforeCrash {
+		t.Errorf("nextFileNumber = %d, want > %d", e.nextFileNumber, filenumBeforeCrash)
+	}
+
+	// Engine must be fully operational post-recovery.
+	if err := e.Put("newkey", []byte("newval")); err != nil {
+		t.Fatalf("Put after recovery: %v", err)
+	}
+	val, err := e.Get("newkey")
+	if err != nil {
+		t.Fatalf("Get after recovery: %v", err)
+	}
+	if string(val) != "newval" {
+		t.Errorf("Get(\"newkey\") = %q, want \"newval\"", val)
 	}
 }

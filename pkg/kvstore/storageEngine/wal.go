@@ -7,9 +7,6 @@ import (
 	"hash/crc32"
 	"io"
 	"os"
-	"path/filepath"
-	"strconv"
-	"strings"
 )
 
 type wal struct {
@@ -93,14 +90,8 @@ func (wal *wal) writeLog(key string, value []byte, tombstone bool, seq uint64) e
 }
 
 // replayWal recovers MemTable and WAL Metadata from a WAL
-func replayWal(fpath string, maxSeqFromSsts uint64, crcTable *crc32.Table) (*memlog, error) {
-	// --- Parse logNumber from filename: "data/wal/<N>.log" ---
-	base := filepath.Base(fpath)
-	numStr := strings.TrimSuffix(base, ".log")
-	logNumber, err := strconv.ParseUint(numStr, 10, 64)
-	if err != nil {
-		return nil, fmt.Errorf("replayWal: could not parse logNumber from %q: %w", fpath, err)
-	}
+func replayWal(logNumber uint64, maxSeqFromSsts uint64, crcTable *crc32.Table) (*memlog, error) {
+	fpath := fmt.Sprintf("data/wal/%d.log", logNumber)
 
 	// --- Open WAL file ---
 	walFile, err := os.Open(fpath)
@@ -111,7 +102,7 @@ func replayWal(fpath string, maxSeqFromSsts uint64, crcTable *crc32.Table) (*mem
 
 	fi, err := walFile.Stat()
 	if err != nil {
-		return nil, fmt.Errorf("replayWal %q: stat: %w", fpath, err)
+		return nil, fmt.Errorf("replayWal %d: stat: %w", logNumber, err)
 	}
 
 	// --- Replay entries into a fresh memlog ---

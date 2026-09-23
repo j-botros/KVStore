@@ -281,22 +281,25 @@ func writeWalEntries(t *testing.T, logNumber uint64, entries []struct {
 	}
 }
 
-// TestReplayWal_BadPath verifies that a filename that cannot be parsed as
-// "<N>.log" returns an error containing "could not parse logNumber".
-func TestReplayWal_BadPath(t *testing.T) {
+// TestReplayWal_LogNumNotFound verifies that a logNumber with no corresponding
+// file on disk returns a non-nil OS error.
+func TestReplayWal_LogNumNotFound(t *testing.T) {
 	setupTestDir(t)
 	crcTab := crc32.MakeTable(crc32.Castagnoli)
-
-	_, err := replayWal("data/wal/bad-name.log", 0, crcTab)
-	if err == nil {
-		t.Fatal("expected error for unparseable filename, got nil")
+	if err := os.MkdirAll("data/wal", 0755); err != nil {
+		t.Fatal(err)
 	}
-	if !containsStr(err.Error(), "could not parse logNumber") {
-		t.Errorf("unexpected error message: %v", err)
+
+	ml, err := replayWal(999, 0, crcTab)
+	if err == nil {
+		t.Fatal("expected error for non-existent logNumber, got nil")
+	}
+	if ml != nil {
+		t.Error("expected nil memlog on error")
 	}
 }
 
-// TestReplayWal_FileNotFound verifies that a well-formed path for a file that
+// TestReplayWal_FileNotFound verifies that a logNumber for a file that
 // does not exist returns a non-nil OS error.
 func TestReplayWal_FileNotFound(t *testing.T) {
 	setupTestDir(t)
@@ -305,7 +308,7 @@ func TestReplayWal_FileNotFound(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ml, err := replayWal("data/wal/99.log", 0, crcTab)
+	ml, err := replayWal(99, 0, crcTab)
 	if err == nil {
 		t.Fatal("expected error for missing file, got nil")
 	}
@@ -330,7 +333,7 @@ func TestReplayWal_EmptyWal(t *testing.T) {
 	}
 	f.Close()
 
-	ml, err := replayWal("data/wal/1.log", 0, crcTab)
+	ml, err := replayWal(1, 0, crcTab)
 	if err != nil {
 		t.Fatalf("replayWal: %v", err)
 	}
@@ -363,7 +366,7 @@ func TestReplayWal_SingleEntry_Replayed(t *testing.T) {
 		{"cat", []byte("meow"), false, 5},
 	}, crcTab)
 
-	ml, err := replayWal("data/wal/1.log", 0, crcTab)
+	ml, err := replayWal(1, 0, crcTab)
 	if err != nil {
 		t.Fatalf("replayWal: %v", err)
 	}
@@ -402,7 +405,7 @@ func TestReplayWal_TombstoneEntry(t *testing.T) {
 		{"dead", []byte{}, true, 3},
 	}, crcTab)
 
-	ml, err := replayWal("data/wal/1.log", 0, crcTab)
+	ml, err := replayWal(1, 0, crcTab)
 	if err != nil {
 		t.Fatalf("replayWal: %v", err)
 	}
@@ -436,7 +439,7 @@ func TestReplayWal_AllEntriesFiltered(t *testing.T) {
 	}, crcTab)
 
 	// maxSeqFromSsts is higher than all entries
-	ml, err := replayWal("data/wal/1.log", 5, crcTab)
+	ml, err := replayWal(1, 5, crcTab)
 	if err != nil {
 		t.Fatalf("replayWal: %v", err)
 	}
@@ -471,7 +474,7 @@ func TestReplayWal_PartialFilter(t *testing.T) {
 		{"k3", []byte("v3"), false, 10}, // seq 10 > 5: replayed
 	}, crcTab)
 
-	ml, err := replayWal("data/wal/1.log", 5, crcTab)
+	ml, err := replayWal(1, 5, crcTab)
 	if err != nil {
 		t.Fatalf("replayWal: %v", err)
 	}
@@ -512,7 +515,7 @@ func TestReplayWal_LogNumberPreserved(t *testing.T) {
 		{"k", []byte("v"), false, 1},
 	}, crcTab)
 
-	ml, err := replayWal("data/wal/42.log", 0, crcTab)
+	ml, err := replayWal(42, 0, crcTab)
 	if err != nil {
 		t.Fatalf("replayWal: %v", err)
 	}
@@ -551,7 +554,7 @@ func TestReplayWal_CorruptTailEntry(t *testing.T) {
 	}
 	f.Close()
 
-	ml, err := replayWal("data/wal/1.log", 0, crcTab)
+	ml, err := replayWal(1, 0, crcTab)
 	if err != nil {
 		t.Fatalf("replayWal: %v", err)
 	}
@@ -589,7 +592,7 @@ func TestReplayWal_RoundTrip(t *testing.T) {
 		{"d", []byte("vd"), false, 4},
 	}, crcTab)
 
-	ml, err := replayWal("data/wal/1.log", 0, crcTab)
+	ml, err := replayWal(1, 0, crcTab)
 	if err != nil {
 		t.Fatalf("replayWal: %v", err)
 	}

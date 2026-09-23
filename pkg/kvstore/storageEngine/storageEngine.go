@@ -4,6 +4,9 @@ import (
 	"fmt"
 	"hash/crc32"
 	"os"
+	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 )
@@ -45,6 +48,100 @@ func NewStorageEngine(memCapacity uint64, sstCapacity uint64, l0Capacity uint64,
 
 		// mu and compacting are ready to use with their zero values (unlocked and false)
 	}
+}
+
+func rebuildEngine(memCapacity uint64, sstCapacity uint64, l0Capacity uint64, growthFactor int) (*StorageEngine, error) {
+	crcTable := crc32.MakeTable(crc32.Castagnoli)
+
+	// Step 1: Recover SSTable state.
+	ssts, maxSstSeq, maxSstFilenum, err := rebuildSstables(l0Capacity, growthFactor, crcTable)
+	if err != nil {
+		return nil, fmt.Errorf("rebuildEngine: rebuildSstables: %w", err)
+	}
+
+	// Step 2: Scan WAL directory for *.log files.
+	walDir := "data/wal"
+	des, err := os.ReadDir(walDir)
+	if err != nil && !os.IsNotExist(err) {
+		return nil, fmt.Errorf("rebuildEngine: reading %s: %w", walDir, err)
+	}
+
+	var logNums []uint64
+	for _, de := range des {
+		if de.IsDir() || !strings.HasSuffix(de.Name(), ".log") {
+			continue
+		}
+		logNum, err := strconv.ParseUint(strings.TrimSuffix(de.Name(), ".log"), 10, 64)
+		if err != nil {
+			continue // skip files that don't match <N>.log
+		}
+		logNums = append(logNums, logNum)
+	}
+
+	// Sort from oldest to newest so immutables end up in the right order.
+	sort.Slice(logNums, func(i, j int) bool { return logNums[i] < logNums[j] })
+
+	// Step 3: Replay each WAL file.
+	var memlogs []*memlog
+	for _, logNum := range logNums {
+		ml, err := replayWal(logNum, maxSstSeq, crcTable)
+		if err != nil {
+			return nil, fmt.Errorf("rebuildEngine: replayWal(%d): %w", logNum, err)
+		}
+		memlogs = append(memlogs, ml)
+	}
+
+	// Step 4: Assign active and immutables.
+	//
+	// If no WAL files exist (e.g. first run after SST-only state), create a
+	// fresh active memlog whose logNumber is one past the highest seen filenum.
+	var active *memlog
+	var immutables []*memlog
+	maxWalLogNum := uint64(0)
+	maxWalSeq := uint64(0)
+
+	if len(memlogs) == 0 {
+		// No WALs on disk; start a brand-new active memlog.
+		newLogNum := maxSstFilenum + 1
+		active = newMemlog(newLogNum, crcTable)
+		maxWalLogNum = newLogNum
+	} else {
+		// All but the last WAL are immutable; the last (newest) is active.
+		immutables = memlogs[:len(memlogs)-1]
+		active = memlogs[len(memlogs)-1]
+		maxWalLogNum = logNums[len(logNums)-1]
+		for _, ml := range memlogs {
+			if ml.wal.lastSeq > maxWalSeq {
+				maxWalSeq = ml.wal.lastSeq
+			}
+		}
+	}
+
+	// Step 5: Derive counters.
+	//
+	// nextSeq must be strictly greater than every seq seen on disk.
+	// nextFileNumber must be strictly greater than every filenum seen on disk.
+	nextSeq := max(maxSstSeq, maxWalSeq) + 1
+	nextFileNumber := max(maxSstFilenum, maxWalLogNum) + 1
+
+	if immutables == nil {
+		immutables = make([]*memlog, 0)
+	}
+
+	return &StorageEngine{
+		memCapacity: memCapacity,
+		sstCapacity: sstCapacity,
+		crcTable:    crcTable,
+
+		nextFileNumber: nextFileNumber,
+		nextSeq:        nextSeq,
+
+		active:     active,
+		immutables: immutables,
+		sstables:   ssts,
+
+		// mu and compacting are ready to use with their zero values
+	}, nil
 }
 
 type memlog struct {
