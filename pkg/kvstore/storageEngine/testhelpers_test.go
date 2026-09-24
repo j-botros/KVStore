@@ -163,22 +163,15 @@ func newTestEngine(t *testing.T) *StorageEngine {
 func newTestEngineWithCapacity(t *testing.T, sstCap uint64) *StorageEngine {
 	t.Helper()
 	setupTestDir(t)
-	if err := os.MkdirAll("data/wal", 0755); err != nil {
-		t.Fatal(err)
-	}
 
-	crcTable := crc32.MakeTable(crc32.Castagnoli)
-
-	return &StorageEngine{
-		memCapacity:    defaultSstCapacity, // large enough to never auto-flush in non-flush tests
-		sstCapacity:    sstCap,
-		crcTable:       crcTable,
-		nextFileNumber: 1,
-		nextSeq:        1,
-		active:         newMemlog(1, crcTable),
-		immutables:     make([]*memlog, 0),
-		sstables:       newSstables(4096, 10, crcTable),
-	}
+	// Use newStorageEngine to ensure directories are created properly
+	engine := newStorageEngine(defaultSstCapacity, sstCap, 4096, 10)
+	
+	// Set custom properties required by tests
+	engine.memCapacity = defaultSstCapacity // large enough to never auto-flush in non-flush tests
+	engine.nextSeq = 1                      // Tests expect nextSeq to start at 1
+	
+	return engine
 }
 
 // newTestEngineWithMemCapacity is like newTestEngine but sets a custom memCapacity
@@ -186,20 +179,12 @@ func newTestEngineWithCapacity(t *testing.T, sstCap uint64) *StorageEngine {
 func newTestEngineWithMemCapacity(t *testing.T, memCap uint64) *StorageEngine {
 	t.Helper()
 	setupTestDir(t)
-	if err := os.MkdirAll("data/wal", 0755); err != nil {
-		t.Fatal(err)
-	}
 
-	crcTable := crc32.MakeTable(crc32.Castagnoli)
-
-	return &StorageEngine{
-		memCapacity:    memCap,
-		sstCapacity:    defaultSstCapacity,
-		crcTable:       crcTable,
-		nextFileNumber: 1,
-		nextSeq:        1,
-		active:         newMemlog(1, crcTable),
-		immutables:     make([]*memlog, 0),
-		sstables:       newSstables(4096, 10, crcTable),
-	}
+	// Use newStorageEngine to ensure directories are created properly
+	engine := newStorageEngine(memCap, defaultSstCapacity, 4096, 10)
+	
+	// Set custom properties required by tests
+	engine.nextSeq = 1 // Tests expect nextSeq to start at 1
+	
+	return engine
 }

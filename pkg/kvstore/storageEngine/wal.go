@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"hash/crc32"
 	"io"
+	"log"
 	"os"
 )
 
@@ -111,12 +112,12 @@ func replayWal(logNumber uint64, maxSeqFromSsts uint64, crcTable *crc32.Table) (
 	// readEntry expects an *io.SectionReader; wrap the whole file in one.
 	r := io.NewSectionReader(walFile, 0, fi.Size())
 	for {
+		offset, _ := r.Seek(0, io.SeekCurrent)
 		e, err := readEntry(r, crcTable)
 		if err == ErrEntryNotFound {
 			break // clean EOF
 		} else if err != nil {
-			// A partial write at the tail (crash mid-write) is possible.
-			// Treat any decode/checksum error at this point as end-of-log.
+			log.Printf("replayWal %d: stopping replay at offset %d due to error: %v", logNumber, offset, err)
 			break
 		}
 

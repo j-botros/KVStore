@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
+	"strings"
 	"sync"
 )
 
@@ -1000,13 +1002,30 @@ func replaySst(fpath string, crcTable *crc32.Table) (*sst, error) {
 func rebuildSstables(l0Capacity uint64, growthFactor int, crcTable *crc32.Table) (ssts *sstables, maxSeq uint64, maxFilenum uint64, err error) {
 	ssts = newSstables(l0Capacity, growthFactor, crcTable)
 
-	// Iterate through levels
-	for lvl := 0; ; lvl++ {
+	// Determine max level by scanning data/sstables/
+	entries, err := os.ReadDir("data/sstables")
+	maxLvl := -1
+	if err == nil {
+		for _, de := range entries {
+			if de.IsDir() && strings.HasPrefix(de.Name(), "level-") {
+				if lvl, err := strconv.Atoi(strings.TrimPrefix(de.Name(), "level-")); err == nil {
+					if lvl > maxLvl {
+						maxLvl = lvl
+					}
+				}
+			}
+		}
+	} else if !os.IsNotExist(err) {
+		return nil, 0, 0, fmt.Errorf("rebuildSstables: reading data/sstables: %w", err)
+	}
+
+	// Iterate from 0 to maxLvl
+	for lvl := 0; lvl <= maxLvl; lvl++ {
 		dir := fmt.Sprintf("data/sstables/level-%d", lvl)
 
-		entries, err := os.ReadDir(dir)
-		if os.IsNotExist(err) { // No more directories
-			break
+		lvlEntries, err := os.ReadDir(dir)
+		if os.IsNotExist(err) { // Skip missing directories
+			continue
 		} else if err != nil {
 			return nil, 0, 0, fmt.Errorf("rebuildSstables: reading %s: %w", dir, err)
 		}
@@ -1020,7 +1039,7 @@ func rebuildSstables(l0Capacity uint64, growthFactor int, crcTable *crc32.Table)
 
 		lvlObj := ssts.levels[lvl]
 
-		for _, de := range entries {
+		for _, de := range lvlEntries {
 			if de.IsDir() || filepath.Ext(de.Name()) != ".sst" {
 				continue
 			}

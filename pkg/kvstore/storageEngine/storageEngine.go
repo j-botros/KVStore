@@ -3,6 +3,7 @@ package storageengine
 import (
 	"fmt"
 	"hash/crc32"
+	"log"
 	"os"
 	"sort"
 	"strconv"
@@ -28,6 +29,10 @@ type StorageEngine struct {
 }
 
 func newStorageEngine(memCapacity uint64, sstCapacity uint64, l0Capacity uint64, growthFactor int) *StorageEngine {
+	// Ensure data directories exist for a completely fresh start
+	os.MkdirAll("data/wal", 0755)
+	os.MkdirAll("data/sstables", 0755)
+
 	crcTable := crc32.MakeTable(crc32.Castagnoli)
 
 	nextFileNumber := uint64(0)
@@ -274,14 +279,18 @@ func (e *StorageEngine) flush() error {
 	// Step 2: Serialize the frozen memtable to disk (no lock held)
 	err := e.sstables.flush(fileNum, ml.memtable)
 	if err != nil {
+		log.Printf("flush error: failed to write SSTable for filenum %d: %v", fileNum, err)
 		return err
 	}
 
 	// Step 3: Remove the now-flushed memlog from immutables under write lock
 	e.mu.Lock()
-	if len(e.immutables) > 0 {
-		e.immutables[0] = nil // prevent memory leak
-		e.immutables = e.immutables[1:]
+	for i, current := range e.immutables {
+		if current == ml {
+			e.immutables[i] = nil // prevent memory leak
+			e.immutables = append(e.immutables[:i], e.immutables[i+1:]...)
+			break
+		}
 	}
 	e.mu.Unlock()
 

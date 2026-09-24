@@ -8,7 +8,7 @@ KVStore is a distributed, high-performance Key-Value store written in Go. It is 
   - **Memtable:** Fast in-memory writes and reads using a probabilistic skip list.
   - **Write-Ahead Log (WAL):** Ensures durability; data is appended to the WAL before being applied to the memtable to prevent data loss on crashes.
   - **SSTables (Sorted String Tables):** Immutable on-disk files. Includes CRC32 checksums for data integrity and Bloom Filters for fast point-lookup queries.
-  - **Background Operations:** Concurrent memtable flushing and automatic leveled compaction.
+  - **Background Operations:** Concurrent memtable flushing and automatic leveled compaction. *(Note: Failed background flushes are currently logged but not retried; adding a retry mechanism is considered for future fault tolerance improvements to prevent unbounded immutables growth.)*
 - **RESTful API:** Exposes endpoints to `GET`, `POST`, and `DELETE` key-value pairs.
 - **Observability:** Built-in Prometheus metrics (`/metrics`).
 - **Distributed Ready:** Configuration schemas support defining clusters, sharding ranges, and leader-follower replication logic via gRPC.

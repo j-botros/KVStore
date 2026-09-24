@@ -1125,9 +1125,6 @@ func TestOpenStorageEngine_FreshEngine_IsOperational(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenStorageEngine: %v", err)
 	}
-	if err := os.MkdirAll("data/wal", 0755); err != nil {
-		t.Fatal(err)
-	}
 	if err := e.Put("hello", []byte("world")); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
@@ -1212,9 +1209,6 @@ func TestOpenStorageEngine_Idempotent_MultipleOpens(t *testing.T) {
 	e1, err := OpenStorageEngine(openMemCap, openSstCap, openL0Cap, openGrowthFact)
 	if err != nil {
 		t.Fatalf("first OpenStorageEngine: %v", err)
-	}
-	if err := os.MkdirAll("data/wal", 0755); err != nil {
-		t.Fatal(err)
 	}
 	if err := e1.Put("city", []byte("austin")); err != nil {
 		t.Fatalf("Put: %v", err)
