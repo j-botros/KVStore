@@ -18,12 +18,24 @@ import (
 	SSTABLES CLASS
 ==================================================================================== */
 
+// level represents a collection of SSTables that belong to a specific tier (level) in the LSM tree.
+// It is used in the sstables manager to organize SSTables and enforce capacity limits during compactions.
 type level struct {
 	sstList       []*sst
 	capacityBytes uint64
 	sizeBytes     uint64
 }
 
+// newLevel creates and initializes a new level for SSTables.
+//
+// Parameters:
+//   - capacityBytes (uint64): The maximum capacity in bytes for this level.
+//
+// Returns:
+//   - *level: A pointer to the newly created level.
+//
+// Errors:
+//   - None
 func newLevel(capacityBytes uint64) *level {
 	return &level{
 		sstList:       make([]*sst, 0),
@@ -33,6 +45,16 @@ func newLevel(capacityBytes uint64) *level {
 }
 
 // Use this when adding a single SST during compaction to keep L1+ sorted.
+// insertSorted inserts an SSTable into the level while maintaining sort order by start key.
+//
+// Parameters:
+//   - s (*sst): A pointer to the SSTable to insert.
+//
+// Returns:
+//   - None
+//
+// Errors:
+//   - None
 func (l *level) insertSorted(s *sst) {
 	i := sort.Search(len(l.sstList), func(i int) bool {
 		return l.sstList[i].startKey >= s.startKey
@@ -43,12 +65,24 @@ func (l *level) insertSorted(s *sst) {
 }
 
 // Use this once after bulk-loading SSTs from disk on startup.
+// sortByStartKey sorts all SSTables in the level by their start key.
+//
+// Parameters:
+//   - None
+//
+// Returns:
+//   - None
+//
+// Errors:
+//   - None
 func (l *level) sortByStartKey() {
 	sort.Slice(l.sstList, func(i, j int) bool {
 		return l.sstList[i].startKey < l.sstList[j].startKey
 	})
 }
 
+// sstables represents the manager for all Sorted String Tables (SSTables) in the LSM tree.
+// It is used in the storage engine to handle reads from disk, flushes from the memtable, and background compactions.
 type sstables struct {
 	levels       []*level
 	l0Capacity   uint64
@@ -57,6 +91,18 @@ type sstables struct {
 	mu           sync.RWMutex
 }
 
+// newSstables creates and initializes a new sstables manager.
+//
+// Parameters:
+//   - l0Capacity (uint64): The capacity of Level 0 in bytes.
+//   - growthFactor (int): The growth factor for capacities of subsequent levels.
+//   - crcTable (*crc32.Table): The CRC table used for checksum calculations.
+//
+// Returns:
+//   - *sstables: A pointer to the newly created sstables manager.
+//
+// Errors:
+//   - None
 func newSstables(l0Capacity uint64, growthFactor int, crcTable *crc32.Table) *sstables {
 	sstables := &sstables{
 		levels:       make([]*level, 1),
@@ -70,6 +116,18 @@ func newSstables(l0Capacity uint64, growthFactor int, crcTable *crc32.Table) *ss
 	return sstables
 }
 
+// get searches for the value associated with the given key across all SSTables.
+//
+// Parameters:
+//   - key (string): The key to search for.
+//
+// Returns:
+//   - value ([]byte): The value associated with the key if found, otherwise nil.
+//   - err (error): An error if the key is not found or if an issue occurs during reading.
+//
+// Errors:
+//   - ErrKeyNotFound: Thrown when the key does not exist or has a tombstone in the SSTables.
+//   - Other errors from underlying file reads or searches.
 func (sstables *sstables) get(key string) (value []byte, err error) {
 	// Step 1: snapshot candidate SST pointers under a brief read lock.
 	// Holding the lock only for pointer copies, not for any disk I/O.
@@ -146,6 +204,17 @@ func (sstables *sstables) get(key string) (value []byte, err error) {
 	return nil, ErrKeyNotFound
 }
 
+// flush converts a memtable into an SSTable and adds it to Level 0.
+//
+// Parameters:
+//   - filenum (uint64): The file number for the new SSTable.
+//   - memtable (*memtable): The memtable to flush.
+//
+// Returns:
+//   - error: An error if flushing fails, otherwise nil.
+//
+// Errors:
+//   - Throws errors if file creation, writing, or synchronization fails during newSstFromMemtable.
 func (sstables *sstables) flush(filenum uint64, memtable *memtable) error {
 	// I/O phase: no lock held — allows concurrent reads and other flushes.
 	newSst, err := newSstFromMemtable(filenum, memtable, sstables.crcTable)
@@ -166,6 +235,8 @@ func (sstables *sstables) flush(filenum uint64, memtable *memtable) error {
 	SST CLASS & INDEX/BLOCK CLASSES
 ==================================================================================== */
 
+// sst represents a single Sorted String Table (SSTable) file and its metadata.
+// It is used in the storage engine to represent on-disk immutable key-value data, including its bloom filter and index.
 type sst struct {
 	// SST file data
 	filenum   uint64
@@ -198,6 +269,19 @@ const (
 	TARGET_BLOCK_SIZE = 4 * 1024 // 4 KB
 )
 
+// newSst creates an empty SSTable struct in memory.
+//
+// Parameters:
+//   - filenum (uint64): The file number for this SSTable.
+//   - lvl (int): The level this SSTable belongs to.
+//   - crcTable (*crc32.Table): The CRC table for checksums.
+//   - capacity (uint64): The capacity for this SSTable.
+//
+// Returns:
+//   - *sst: A pointer to the newly created SSTable struct.
+//
+// Errors:
+//   - None
 func newSst(filenum uint64, lvl int, crcTable *crc32.Table, capacity uint64) *sst {
 	sst := &sst{
 		filenum:  filenum,
@@ -209,6 +293,19 @@ func newSst(filenum uint64, lvl int, crcTable *crc32.Table, capacity uint64) *ss
 	return sst
 }
 
+// newSstFromMemtable writes the contents of a memtable to a new SSTable file on disk.
+//
+// Parameters:
+//   - filenum (uint64): The file number to assign to the new SSTable.
+//   - memtable (*memtable): The memtable containing the data to persist.
+//   - crcTable (*crc32.Table): The CRC table to use for checksums.
+//
+// Returns:
+//   - *sst: A pointer to the SSTable struct created from the memtable.
+//   - error: An error if file creation or writing fails.
+//
+// Errors:
+//   - Throws errors if creating directories, opening the file, writing data, or syncing to disk fails.
 func newSstFromMemtable(filenum uint64, memtable *memtable, crcTable *crc32.Table) (*sst, error) {
 	sst := &sst{
 		filenum:  filenum,
@@ -365,6 +462,18 @@ func newSstFromMemtable(filenum uint64, memtable *memtable, crcTable *crc32.Tabl
 	return sst, nil
 }
 
+// search looks for a key within the specific SSTable.
+//
+// Parameters:
+//   - key (string): The key to search for.
+//
+// Returns:
+//   - e (*entry): A pointer to the entry if found.
+//   - err (error): An error if the key is not found or a read error occurs.
+//
+// Errors:
+//   - ErrKeyNotFound: Thrown if the key is not in the bloom filter or not found in the block.
+//   - Throws errors if there are issues opening the file or reading the block from disk.
 func (sst *sst) search(key string) (e *entry, err error) {
 	// Check bloom filter
 	if sst.bloomFilter.keyNotPresent(key) {
@@ -408,6 +517,8 @@ func (sst *sst) search(key string) (e *entry, err error) {
 ==================================================================================== */
 
 // compactionWriter holds all mutable state for writing a single output SST during compaction
+// compactionWriter represents a temporary writer used during the compaction process.
+// It is used in the storage engine to construct a new SSTable file, its index, and bloom filter as entries are merged.
 type compactionWriter struct {
 	sst      *sst
 	outFile  *os.File
@@ -426,6 +537,17 @@ type compactionWriter struct {
 	numKeys  uint64
 }
 
+// newCompactionWriter creates a writer to build a new SSTable during compaction.
+//
+// Parameters:
+//   - s (*sst): The SSTable metadata to write into.
+//
+// Returns:
+//   - *compactionWriter: A pointer to the initialized compaction writer.
+//   - error: An error if file creation fails.
+//
+// Errors:
+//   - Throws errors if directory creation or file opening fails.
 func newCompactionWriter(s *sst) (*compactionWriter, error) {
 	filename := fmt.Sprintf("data/sstables/level-%d/%d.sst", s.level, s.filenum)
 	if err := os.MkdirAll(filepath.Dir(filename), 0755); err != nil {
@@ -448,6 +570,16 @@ func newCompactionWriter(s *sst) (*compactionWriter, error) {
 	}, nil
 }
 
+// flushBlock writes the current in-memory block to the file buffer and adds it to the index.
+//
+// Parameters:
+//   - None
+//
+// Returns:
+//   - None
+//
+// Errors:
+//   - None
 func (cw *compactionWriter) flushBlock() {
 	cw.fileBuffer.Write(cw.currentBlockBuf.Bytes())
 	cw.idx = append(cw.idx, newBlock(
@@ -461,6 +593,16 @@ func (cw *compactionWriter) flushBlock() {
 	cw.currentBlockBuf = new(bytes.Buffer)
 }
 
+// writeEntry appends a single entry to the current block buffer.
+//
+// Parameters:
+//   - e (*entry): The entry to write.
+//
+// Returns:
+//   - None
+//
+// Errors:
+//   - None
 func (cw *compactionWriter) writeEntry(e *entry) {
 	cw.bf.setBloomBits(e.key)
 
@@ -493,6 +635,16 @@ func (cw *compactionWriter) writeEntry(e *entry) {
 	}
 }
 
+// finalize flushes remaining data, writes index/footer, and closes the output SSTable file.
+//
+// Parameters:
+//   - None
+//
+// Returns:
+//   - error: An error if writing or syncing to disk fails.
+//
+// Errors:
+//   - Throws errors if the file Write, Sync, or Close operations fail.
 func (cw *compactionWriter) finalize() error {
 	if cw.currentBlockBuf.Len() > 0 {
 		cw.flushBlock()
@@ -538,6 +690,16 @@ func (cw *compactionWriter) finalize() error {
 	return cw.outFile.Close()
 }
 
+// abort cancels the compaction process, closes the file, and deletes the incomplete file.
+//
+// Parameters:
+//   - None
+//
+// Returns:
+//   - None
+//
+// Errors:
+//   - None
 func (cw *compactionWriter) abort() {
 	cw.outFile.Close()
 	os.Remove(cw.filename)
@@ -553,6 +715,8 @@ func (cw *compactionWriter) abort() {
 //
 // Because SSTs within the same level never overlap, at most one entry from each
 // stream can be the current minimum — no k-way scan is needed.
+// compactionSrc represents a source iterator for merging two streams of entries during compaction.
+// It is used in the storage engine to efficiently merge a source SSTable with overlapping SSTables from the next level.
 type compactionSrc struct {
 	// Stream A: source SST from lvlIdx
 	srcSst  *sst
@@ -571,6 +735,19 @@ type compactionSrc struct {
 	crcTable *crc32.Table
 }
 
+// newCompactionSrc creates a source iterator to merge an SSTable with overlapping SSTables.
+//
+// Parameters:
+//   - srcSst (*sst): The primary source SSTable.
+//   - overlapping ([]*sst): A list of overlapping SSTables from the next level.
+//   - crcTable (*crc32.Table): The CRC table used for checksum verification.
+//
+// Returns:
+//   - *compactionSrc: A pointer to the newly created compaction source.
+//   - error: An error if opening or reading the source files fails.
+//
+// Errors:
+//   - Throws errors if opening files or reading the initial entries from disk fails.
 func newCompactionSrc(srcSst *sst, overlapping []*sst, crcTable *crc32.Table) (*compactionSrc, error) {
 	src := &compactionSrc{
 		srcSst:      srcSst,
@@ -627,6 +804,15 @@ func newCompactionSrc(srcSst *sst, overlapping []*sst, crcTable *crc32.Table) (*
 }
 
 // openOverlap opens the overlapping SST at index i and pre-fetches its first entry.
+//
+// Parameters:
+//   - i (int): The index of the overlapping SSTable in the list.
+//
+// Returns:
+//   - error: An error if file opening or reading fails.
+//
+// Errors:
+//   - Throws errors if the overlapping file cannot be opened or if reading the first entry fails.
 func (src *compactionSrc) openOverlap(i int) error {
 	if src.overlapFile != nil {
 		src.overlapFile.Close()
@@ -659,6 +845,15 @@ func (src *compactionSrc) openOverlap(i int) error {
 // nextOverlapEntry reads the next entry from the current overlap SST.
 // When it is exhausted, it transparently advances to the next overlap SST.
 // Returns nil when all overlap SSTs are exhausted.
+//
+// Parameters:
+//   - None
+//
+// Returns:
+//   - *entry: The next entry from the overlapping SSTables, or nil if none are left.
+//
+// Errors:
+//   - None (errors during file reading may lead to exhausting the current overlap prematurely).
 func (src *compactionSrc) nextOverlapEntry() *entry {
 	e, err := readEntry(src.overlapRdr, src.crcTable)
 	if err == nil {
@@ -687,6 +882,15 @@ func (src *compactionSrc) nextOverlapEntry() *entry {
 
 // advance selects the next entry to write via 2-pointer comparison.
 // Sets src.pending and returns ErrCompactionDone when both streams are exhausted.
+//
+// Parameters:
+//   - None
+//
+// Returns:
+//   - error: ErrCompactionDone if both source streams are completely exhausted.
+//
+// Errors:
+//   - ErrCompactionDone: Thrown to indicate no more entries are left to process.
 func (src *compactionSrc) advance() error {
 	a := src.srcHead
 	b := src.overlapHead
@@ -739,6 +943,16 @@ func (src *compactionSrc) advance() error {
 	return nil
 }
 
+// close closes open file descriptors and releases read locks on the SSTables used for compaction.
+//
+// Parameters:
+//   - None
+//
+// Returns:
+//   - None
+//
+// Errors:
+//   - None
 func (src *compactionSrc) close() {
 	if src.srcFile != nil {
 		src.srcFile.Close()
@@ -758,10 +972,17 @@ func (src *compactionSrc) close() {
 // isLastLevel controls tombstone pruning: tombstones are dropped at the last level
 // since there are no deeper levels to shadow.
 //
+// Parameters:
+//   - src (*compactionSrc): The compaction source iterator providing sorted entries.
+//   - isLastLevel (bool): Indicates if the compaction is merging into the last level (for tombstone pruning).
+//
 // Returns:
-//   - ErrCompactionDone  — all source entries written; newSst is finalized on disk.
-//   - ErrCompactionFull  — newSst reached capacity; finalized on disk, sources remain.
-//   - other error        — I/O or data error; partially-written file is removed.
+//   - error: ErrCompactionDone, ErrCompactionFull, or an I/O error.
+//
+// Errors:
+//   - ErrCompactionDone: Thrown when all source entries are successfully written.
+//   - ErrCompactionFull: Thrown when the new SSTable reaches its maximum capacity.
+//   - Throws other errors for file I/O or processing failures.
 func (newSst *sst) compact(src *compactionSrc, isLastLevel bool) error {
 	cw, err := newCompactionWriter(newSst)
 	if err != nil {
@@ -800,6 +1021,8 @@ func (newSst *sst) compact(src *compactionSrc, isLastLevel bool) error {
 	}
 }
 
+// block represents metadata about a data block within an SSTable.
+// It is used in the SSTable index to keep track of block offsets, lengths, and key ranges for binary searching.
 type block struct {
 	lastKey      string
 	offset       uint64
@@ -808,6 +1031,19 @@ type block struct {
 }
 type index []*block
 
+// newBlock creates a block metadata struct for an SSTable index.
+//
+// Parameters:
+//   - lastKey (string): The highest key present in this block.
+//   - offset (uint64): The file offset where this block starts.
+//   - length (uint64): The length of this block in bytes.
+//   - prevBlockKey (string): The highest key in the immediately preceding block.
+//
+// Returns:
+//   - *block: A pointer to the newly created block metadata.
+//
+// Errors:
+//   - None
 func newBlock(lastKey string, offset uint64, length uint64, prevBlockKey string) *block {
 	return &block{
 		lastKey:      lastKey,
@@ -817,6 +1053,18 @@ func newBlock(lastKey string, offset uint64, length uint64, prevBlockKey string)
 	}
 }
 
+// getDatablock searches the index to find the offset and length of the block containing the key.
+//
+// Parameters:
+//   - key (string): The key to locate in the index.
+//
+// Returns:
+//   - offset (uint64): The starting byte offset of the block.
+//   - length (uint64): The length in bytes of the block.
+//   - err (error): An error if the key cannot possibly be in any block based on the index.
+//
+// Errors:
+//   - ErrKeyNotFound: Thrown when the given key is outside the bounds of all blocks in the index.
 func (index *index) getDatablock(key string) (offset uint64, length uint64, err error) {
 	l := 0
 	r := len(*index) - 1
@@ -838,6 +1086,19 @@ func (index *index) getDatablock(key string) (offset uint64, length uint64, err 
 
 // readFooter reads the footer, index, and bloom filter from an open SST file.
 // The file offset is not assumed; the function seeks to the footer itself.
+//
+// Parameters:
+//   - sstFile (*os.File): An open file descriptor to the SSTable file.
+//
+// Returns:
+//   - idx (*index): A pointer to the parsed index list.
+//   - bf (*bloomFilter): A pointer to the parsed bloom filter.
+//   - indexOffset (uint64): The file offset where the index begins (and data blocks end).
+//   - err (error): An error if reading or parsing the footer fails.
+//
+// Errors:
+//   - ErrBadFile: Thrown if the magic number at the end of the file is incorrect.
+//   - Throws errors if seeking or reading data from the file fails.
 func readFooter(sstFile *os.File) (idx *index, bf *bloomFilter, indexOffset uint64, err error) {
 	_, err = sstFile.Seek(-FOOTER_SIZE, io.SeekEnd)
 	if err != nil {
@@ -915,7 +1176,18 @@ func readFooter(sstFile *os.File) (idx *index, bf *bloomFilter, indexOffset uint
 }
 
 // replaySst opens an SST file on disk and reconstructs the in-memory sst struct
-// without reading any data blocks
+// without reading any data blocks.
+//
+// Parameters:
+//   - fpath (string): The file path of the SSTable.
+//   - crcTable (*crc32.Table): The CRC table for checksums.
+//
+// Returns:
+//   - *sst: A pointer to the reconstructed SSTable struct.
+//   - error: An error if parsing or reading the file fails.
+//
+// Errors:
+//   - Throws errors if the file path cannot be parsed, opening the file fails, reading the footer fails, or the index is empty.
 func replaySst(fpath string, crcTable *crc32.Table) (*sst, error) {
 	// --- Parse level and filenum from fpath ---
 	// Expected format: "data/sstables/level-N/F.sst"
@@ -993,12 +1265,19 @@ func replaySst(fpath string, crcTable *crc32.Table) (*sst, error) {
 // rebuildSstables scans the data/sstables/ directory tree and reconstructs the
 // full in-memory sstables state from every SST file found on disk.
 //
-// It returns:
-//   - the rebuilt *sstables instance (with all levels populated and sorted)
-//   - maxSeq: the highest lastSeq seen across all SSTs (used by rebuildEngine
-//     to know which WAL entries still need to be replayed)
-//   - maxFilenum: the highest filenum seen (used to set nextFileNumber)
-//   - any I/O or parse error encountered
+// Parameters:
+//   - l0Capacity (uint64): Capacity in bytes for Level 0.
+//   - growthFactor (int): Multiplier for capacity of subsequent levels.
+//   - crcTable (*crc32.Table): The CRC table for checksums.
+//
+// Returns:
+//   - ssts (*sstables): The rebuilt sstables instance.
+//   - maxSeq (uint64): The highest sequence number seen across all SSTables.
+//   - maxFilenum (uint64): The highest file number seen.
+//   - err (error): Any I/O or parse error encountered during rebuild.
+//
+// Errors:
+//   - Throws errors if reading directories fails or if parsing any individual SSTable file fails.
 func rebuildSstables(l0Capacity uint64, growthFactor int, crcTable *crc32.Table) (ssts *sstables, maxSeq uint64, maxFilenum uint64, err error) {
 	ssts = newSstables(l0Capacity, growthFactor, crcTable)
 
@@ -1067,6 +1346,8 @@ func rebuildSstables(l0Capacity uint64, growthFactor int, crcTable *crc32.Table)
 	return ssts, maxSeq, maxFilenum, nil
 }
 
+// entry represents a single deserialized key-value pair read from an SSTable.
+// It is used internally when reading from SSTables during searches, replays, and compactions.
 type entry struct {
 	seq       uint64
 	tombstone bool
@@ -1074,6 +1355,20 @@ type entry struct {
 	value     []byte
 }
 
+// readEntry parses a single key-value entry from a section of a file.
+//
+// Parameters:
+//   - r (*io.SectionReader): The reader positioned at the start of an entry.
+//   - crcTable (*crc32.Table): The CRC table used to verify the entry's checksum.
+//
+// Returns:
+//   - *entry: A pointer to the parsed entry.
+//   - error: An error if reading fails, EOF is reached, or the checksum is invalid.
+//
+// Errors:
+//   - ErrEntryNotFound: Thrown when EOF is encountered immediately when trying to read.
+//   - ErrBadData: Thrown when the calculated checksum does not match the stored checksum.
+//   - Throws other I/O errors if reading from the reader fails.
 func readEntry(r *io.SectionReader, crcTable *crc32.Table) (*entry, error) {
 	buf := new(bytes.Buffer)
 

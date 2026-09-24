@@ -12,6 +12,8 @@ import (
 	"sync/atomic"
 )
 
+// StorageEngine represents the main database engine handling all key-value operations.
+// It is the primary structure used to coordinate writes to the WAL and memtable, reads from memtables and SSTables, and background compactions.
 type StorageEngine struct {
 	memCapacity uint64
 	sstCapacity uint64 // fixed max data bytes per output SST
@@ -28,6 +30,19 @@ type StorageEngine struct {
 	compacting atomic.Bool  // serializes Compact; allows concurrent Flush calls
 }
 
+// newStorageEngine creates a fresh storage engine with empty data directories.
+//
+// Parameters:
+//   - memCapacity (uint64): Maximum size of the memtable before flushing.
+//   - sstCapacity (uint64): Maximum size of each SSTable.
+//   - l0Capacity (uint64): Maximum capacity of Level 0 SSTables.
+//   - growthFactor (int): The capacity multiplier for subsequent SSTable levels.
+//
+// Returns:
+//   - *StorageEngine: A pointer to the newly initialized storage engine.
+//
+// Errors:
+//   - None
 func newStorageEngine(memCapacity uint64, sstCapacity uint64, l0Capacity uint64, growthFactor int) *StorageEngine {
 	// Ensure data directories exist for a completely fresh start
 	os.MkdirAll("data/wal", 0755)
@@ -59,6 +74,19 @@ func newStorageEngine(memCapacity uint64, sstCapacity uint64, l0Capacity uint64,
 // directory already exists on disk it calls rebuildEngine to recover prior
 // state; otherwise it calls newStorageEngine for a clean start. The caller
 // should always use this instead of newStorageEngine directly.
+//
+// Parameters:
+//   - memCapacity (uint64): Maximum size of the memtable.
+//   - sstCapacity (uint64): Maximum size of each SSTable.
+//   - l0Capacity (uint64): Maximum capacity of Level 0.
+//   - growthFactor (int): Level capacity multiplier.
+//
+// Returns:
+//   - *StorageEngine: A pointer to the opened storage engine.
+//   - error: An error if opening or recovering the engine fails.
+//
+// Errors:
+//   - Throws errors if stating the data directory fails or if rebuilding the engine encounters an error.
 func OpenStorageEngine(memCapacity uint64, sstCapacity uint64, l0Capacity uint64, growthFactor int) (*StorageEngine, error) {
 	_, err := os.Stat("data")
 	if err != nil && !os.IsNotExist(err) {
@@ -74,6 +102,20 @@ func OpenStorageEngine(memCapacity uint64, sstCapacity uint64, l0Capacity uint64
 	return rebuildEngine(memCapacity, sstCapacity, l0Capacity, growthFactor)
 }
 
+// rebuildEngine recovers the state of the storage engine from existing SSTables and WAL files.
+//
+// Parameters:
+//   - memCapacity (uint64): Maximum size of the memtable.
+//   - sstCapacity (uint64): Maximum size of each SSTable.
+//   - l0Capacity (uint64): Maximum capacity of Level 0.
+//   - growthFactor (int): Level capacity multiplier.
+//
+// Returns:
+//   - *StorageEngine: A pointer to the rebuilt storage engine.
+//   - error: An error if reconstruction fails at any step.
+//
+// Errors:
+//   - Throws errors if reading the WAL directory fails, rebuilding SSTables fails, or replaying WALs fails.
 func rebuildEngine(memCapacity uint64, sstCapacity uint64, l0Capacity uint64, growthFactor int) (*StorageEngine, error) {
 	crcTable := crc32.MakeTable(crc32.Castagnoli)
 
@@ -168,11 +210,24 @@ func rebuildEngine(memCapacity uint64, sstCapacity uint64, l0Capacity uint64, gr
 	}, nil
 }
 
+// memlog represents a paired in-memory store (memtable) and its corresponding Write-Ahead Log (WAL).
+// It is used in the storage engine to manage the active mutable data and immutable data before it is flushed to disk.
 type memlog struct {
 	memtable *memtable
 	wal      *wal
 }
 
+// newMemlog creates a pair containing a new memtable and its associated WAL.
+//
+// Parameters:
+//   - logNumber (uint64): The log number assigned to the WAL file.
+//   - crcTable (*crc32.Table): The CRC table used for WAL checksums.
+//
+// Returns:
+//   - *memlog: A pointer to the newly created memlog struct.
+//
+// Errors:
+//   - None
 func newMemlog(logNumber uint64, crcTable *crc32.Table) *memlog {
 	return &memlog{
 		memtable: newMemtable(),
@@ -184,6 +239,18 @@ func newMemlog(logNumber uint64, crcTable *crc32.Table) *memlog {
 	STORAGE (CRUD) METHODS
 ==================================================================================== */
 
+// Get retrieves the value associated with a key from the storage engine.
+//
+// Parameters:
+//   - key (string): The key to fetch.
+//
+// Returns:
+//   - value ([]byte): The value associated with the key if found.
+//   - err (error): An error if the key does not exist or a read failure occurs.
+//
+// Errors:
+//   - ErrKeyNotFound: Thrown if the key is not in the active memtable, immutables, or SSTables.
+//   - Throws other errors from underlying I/O reads.
 func (e *StorageEngine) Get(key string) (value []byte, err error) {
 	// Concurrent Reads allowed; No Writes during Reads
 	e.mu.RLock()
@@ -212,6 +279,17 @@ func (e *StorageEngine) Get(key string) (value []byte, err error) {
 	return value, err
 }
 
+// Put inserts or updates a key-value pair in the storage engine.
+//
+// Parameters:
+//   - key (string): The key to insert.
+//   - value ([]byte): The data to associate with the key.
+//
+// Returns:
+//   - error: An error if the write operation fails.
+//
+// Errors:
+//   - Throws errors if writing to the WAL fails.
 func (e *StorageEngine) Put(key string, value []byte) error {
 	// No concurrent Writes allowed; No Reads during Writes
 	e.mu.Lock()
@@ -236,6 +314,16 @@ func (e *StorageEngine) Put(key string, value []byte) error {
 	return nil
 }
 
+// Delete removes a key from the storage engine by inserting a tombstone marker.
+//
+// Parameters:
+//   - key (string): The key to delete.
+//
+// Returns:
+//   - error: An error if the deletion operation fails.
+//
+// Errors:
+//   - Throws errors if writing the tombstone to the WAL fails.
 func (e *StorageEngine) Delete(key string) error {
 	// No concurrent Writes allowed; No Reads during Writes
 	e.mu.Lock()
@@ -264,6 +352,16 @@ func (e *StorageEngine) Delete(key string) error {
 	BACKGROUND METHODS
 ==================================================================================== */
 
+// flush moves the active memtable to immutables, writes it to an SSTable, and cleans up the WAL.
+//
+// Parameters:
+//   - None
+//
+// Returns:
+//   - error: An error if flushing the SSTable to disk fails.
+//
+// Errors:
+//   - Throws errors if the SSTable file write fails during flush.
 func (e *StorageEngine) flush() error {
 	// Step 1: Rotate active memlog to immutables under write lock
 	e.mu.Lock()
@@ -314,6 +412,17 @@ func (e *StorageEngine) flush() error {
 	return nil
 }
 
+// compact merges an SSTable with overlapping SSTables from the next level to reclaim space and order data.
+//
+// Parameters:
+//   - srcSst (*sst): The SSTable to compact into the next level.
+//
+// Returns:
+//   - error: An error if the compaction fails.
+//
+// Errors:
+//   - ErrLvlNotFound: Thrown if the source SSTable's level doesn't exist.
+//   - Throws errors for I/O issues during file opening, reading, or writing.
 func (e *StorageEngine) compact(srcSst *sst) error {
 	// Serialization guard: only one compaction at a time
 	if !e.compacting.CompareAndSwap(false, true) {

@@ -10,12 +10,25 @@ import (
 	"os"
 )
 
+// wal represents a Write-Ahead Log used for durability and crash recovery.
+// It is used in the storage engine to persist every mutation sequentially before applying it to the in-memory memtable.
 type wal struct {
 	logNumber uint64
 	lastSeq   uint64
 	crcTable  *crc32.Table
 }
 
+// newWal creates and initializes a Write-Ahead Log struct.
+//
+// Parameters:
+//   - logNumber (uint64): The identifier used for the WAL file name.
+//   - crcTable (*crc32.Table): The CRC table for calculating checksums.
+//
+// Returns:
+//   - *wal: A pointer to the created WAL instance.
+//
+// Errors:
+//   - None
 func newWal(logNumber uint64, crcTable *crc32.Table) *wal {
 	return &wal{
 		logNumber: logNumber,
@@ -24,6 +37,20 @@ func newWal(logNumber uint64, crcTable *crc32.Table) *wal {
 	}
 }
 
+// writeLog appends a new entry to the WAL file on disk.
+//
+// Parameters:
+//   - key (string): The key being written.
+//   - value ([]byte): The value being written.
+//   - tombstone (bool): True if the entry represents a deletion.
+//   - seq (uint64): The sequence number of the operation.
+//
+// Returns:
+//   - error: An error if the write fails.
+//
+// Errors:
+//   - Throws errors if opening the file, seeking, writing bytes, or syncing to disk fails.
+//   - io.ErrShortWrite: Thrown if fewer bytes were written than expected.
 func (wal *wal) writeLog(key string, value []byte, tombstone bool, seq uint64) error {
 	filename := fmt.Sprintf("data/wal/%d.log", wal.logNumber)
 
@@ -90,7 +117,20 @@ func (wal *wal) writeLog(key string, value []byte, tombstone bool, seq uint64) e
 	return nil
 }
 
-// replayWal recovers MemTable and WAL Metadata from a WAL
+// replayWal recovers MemTable and WAL Metadata from a WAL.
+// replayWal reads a WAL file from disk and inserts its valid entries into a new memlog.
+//
+// Parameters:
+//   - logNumber (uint64): The identifier of the WAL file to replay.
+//   - maxSeqFromSsts (uint64): The highest sequence number already persisted in SSTables.
+//   - crcTable (*crc32.Table): The CRC table to verify checksums.
+//
+// Returns:
+//   - *memlog: A pointer to the reconstructed memlog.
+//   - error: An error if the WAL file cannot be opened or parsed.
+//
+// Errors:
+//   - Throws errors if opening or stating the file fails, or if an unrecoverable read error occurs.
 func replayWal(logNumber uint64, maxSeqFromSsts uint64, crcTable *crc32.Table) (*memlog, error) {
 	fpath := fmt.Sprintf("data/wal/%d.log", logNumber)
 
