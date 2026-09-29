@@ -46,9 +46,10 @@ func main() {
 
 	service := service.NewService(engine)
 
-	ctrl := ctrl.NewStoreController(service)
+	storeCtrl := ctrl.NewStoreController(service)
+	monCtrl := ctrl.NewMonitoringController(engine)
 
-	kvstore := kvstore.NewKVStore(ctrl)
+	kvstore := kvstore.NewKVStore(storeCtrl, monCtrl)
 
 	err = kvstore.Start(config.server.httpPort, config.server.nodeId)
 	if err != nil {

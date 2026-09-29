@@ -5,6 +5,7 @@ import (
 	"hash/crc32"
 	"log"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -28,6 +29,10 @@ type StorageEngine struct {
 
 	mu         sync.RWMutex // guards active, immutables, nextSeq, nextFileNumber
 	compacting atomic.Bool  // serializes Compact; allows concurrent Flush calls
+
+	compactionRuns atomic.Uint64
+	flushRuns      atomic.Uint64
+	keysTotal      atomic.Int64
 }
 
 // newStorageEngine creates a fresh storage engine with empty data directories.
@@ -305,6 +310,7 @@ func (e *StorageEngine) Put(key string, value []byte) error {
 
 	// Push to Memtable
 	e.active.memtable.insert(key, value, seq)
+	e.keysTotal.Add(1)
 
 	// Flush if Memtable is full
 	if e.active.memtable.sizeBytes >= e.memCapacity {
@@ -339,6 +345,7 @@ func (e *StorageEngine) Delete(key string) error {
 
 	// Delete from Memtable
 	e.active.memtable.delete(key, seq)
+	e.keysTotal.Add(-1)
 
 	// Flush if Memtable is full
 	if e.active.memtable.sizeBytes >= e.memCapacity {
@@ -408,6 +415,8 @@ func (e *StorageEngine) flush() error {
 	if compactSrc != nil {
 		go func() { _ = e.compact(compactSrc) }()
 	}
+
+	e.flushRuns.Add(1)
 
 	return nil
 }
@@ -535,5 +544,63 @@ func (e *StorageEngine) compact(srcSst *sst) error {
 		go func() { _ = e.compact(nextSrc) }()
 	}
 
+	e.compactionRuns.Add(1)
+
 	return nil
 }
+
+// StorageEngineStats is a point-in-time snapshot of storage engine metrics.
+type StorageEngineStats struct {
+	MemtableSizeBytes     uint64
+	WalSizeBytes          uint64
+	SstableDiskUsageBytes uint64
+	KeysTotal             int64
+	CompactionRunsTotal   uint64
+	FlushRunsTotal        uint64
+}
+
+// Stats returns a snapshot of the current storage engine state.
+// It acquires a short read lock to copy the relevant fields.
+func (e *StorageEngine) Stats() StorageEngineStats {
+	e.mu.RLock()
+	memSize := e.active.memtable.sizeBytes
+	for _, imm := range e.immutables {
+		memSize += imm.memtable.sizeBytes
+	}
+	e.mu.RUnlock()
+
+	// WAL size: sum sizes of all *.log files in data/wal/
+	walSize := dirSizeBytes("data/wal")
+
+	// SSTable disk usage: sum sizes of all *.sst files
+	sstSize := dirSizeBytes("data/sstables")
+
+	return StorageEngineStats{
+		MemtableSizeBytes:     memSize,
+		WalSizeBytes:          walSize,
+		SstableDiskUsageBytes: sstSize,
+		KeysTotal:             e.keysTotal.Load(),
+		CompactionRunsTotal:   e.compactionRuns.Load(),
+		FlushRunsTotal:        e.flushRuns.Load(),
+	}
+}
+
+func dirSizeBytes(root string) uint64 {
+	var size uint64
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return 0
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			info, err := entry.Info()
+			if err == nil {
+				size += uint64(info.Size())
+			}
+		} else {
+			size += dirSizeBytes(filepath.Join(root, entry.Name()))
+		}
+	}
+	return size
+}
+

@@ -5,6 +5,7 @@ import (
 	"errors"
 	service "kvstore/pkg/kvstore/service"
 	"net/http"
+	"time"
 )
 
 type StoreController struct {
@@ -24,6 +25,12 @@ func (c *StoreController) RegisterRoutes(mux *http.ServeMux) {
 }
 
 func (c *StoreController) handleGet(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	defer func() {
+		GetLatencyMs.Observe(float64(time.Since(start).Milliseconds()))
+		GetRequestsTotal.Inc()
+	}()
+
 	key := r.PathValue("key")
 
 	value, err := c.service.Get(key)
@@ -49,6 +56,12 @@ type putRequest struct {
 }
 
 func (c *StoreController) handlePut(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	defer func() {
+		PutLatencyMs.Observe(float64(time.Since(start).Milliseconds()))
+		PutRequestsTotal.Inc()
+	}()
+
 	key := r.PathValue("key")
 
 	var body putRequest
@@ -68,6 +81,12 @@ func (c *StoreController) handlePut(w http.ResponseWriter, r *http.Request) {
 }
 
 func (c *StoreController) handleDelete(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	defer func() {
+		DeleteLatencyMs.Observe(float64(time.Since(start).Milliseconds()))
+		DeleteRequestsTotal.Inc()
+	}()
+
 	key := r.PathValue("key")
 
 	err := c.service.Delete(key)

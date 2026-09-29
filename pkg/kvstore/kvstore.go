@@ -4,26 +4,25 @@ import (
 	"fmt"
 	ctrl "kvstore/pkg/kvstore/interface/http"
 	"net/http"
-
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 type KVStore struct {
-	ctrl *ctrl.StoreController
+	storeCtrl      *ctrl.StoreController
+	monitoringCtrl *ctrl.MonitoringController
 }
 
-func NewKVStore(ctrl *ctrl.StoreController) *KVStore {
-	return &KVStore{ctrl: ctrl}
+func NewKVStore(storeCtrl *ctrl.StoreController, monitoringCtrl *ctrl.MonitoringController) *KVStore {
+	return &KVStore{storeCtrl: storeCtrl, monitoringCtrl: monitoringCtrl}
 }
 
 func (kvstore *KVStore) Start(port int, nodeId string) error {
 	mux := http.NewServeMux()
 
 	// 1. Register KV CRUD routes via Controller
-	kvstore.ctrl.RegisterRoutes(mux)
+	kvstore.storeCtrl.RegisterRoutes(mux)
 
 	// 2. Register operational routes
-	mux.Handle("/metrics", promhttp.Handler())
+	kvstore.monitoringCtrl.RegisterRoutes(mux)
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
