@@ -20,6 +20,8 @@ To return the most recent version of a key, the storage engine queries component
 2. **Disk I/O**: The immutable memtable is written to disk as a new Sorted String Table (SSTable) at **Level 0 (L0)**.
 3. **Cleanup**: Once the SSTable is safely on disk, the immutable memtable is discarded and its associated WAL file is deleted.
 
+*(Note: Failed background flushes are currently logged but not retried; adding a retry mechanism is considered for future fault tolerance improvements to prevent unbounded immutables growth.)*
+
 ### Compaction
 - As SSTables accumulate in Level 0 and beyond, levels exceed their capacity limits.
 - A background **Leveled Compaction** process merges overlapping SSTables from a lower level (e.g., Level 0) with a higher level (e.g., Level 1) into a new set of strictly-sorted SSTables.
