@@ -1,0 +1,91 @@
+syntax = "proto3";
+
+package kvstore.grpc;
+
+option go_package = "kvstore/pkg/kvstore/interface/grpc";
+
+// ─────────────────────────────────────────────
+// KVStore gRPC service
+// ─────────────────────────────────────────────
+service KVStore {
+  // Forwarding RPCs — used by a coordinator to forward client requests
+  // to the node that owns the key.
+  rpc ForwardGet(ForwardGetRequest)       returns (ForwardGetResponse);
+  rpc ForwardPut(ForwardPutRequest)       returns (ForwardPutResponse);
+  rpc ForwardDelete(ForwardDeleteRequest) returns (ForwardDeleteResponse);
+
+  // Replication — push a log entry from the leader to a replica.
+  rpc ReplicateEntry(ReplicateEntryRequest) returns (ReplicateEntryResponse);
+
+  // Cluster health — lightweight liveness ping between nodes.
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+}
+
+// ─────────────────────────────────────────────
+// ForwardGet
+// ─────────────────────────────────────────────
+message ForwardGetRequest {
+  string key = 1;
+}
+
+message ForwardGetResponse {
+  bytes value = 1;
+  bool  found = 2;
+}
+
+// ─────────────────────────────────────────────
+// ForwardPut
+// ─────────────────────────────────────────────
+message ForwardPutRequest {
+  string key   = 1;
+  bytes  value = 2;
+}
+
+message ForwardPutResponse {
+  bool success = 1;
+}
+
+// ─────────────────────────────────────────────
+// ForwardDelete
+// ─────────────────────────────────────────────
+message ForwardDeleteRequest {
+  string key = 1;
+}
+
+message ForwardDeleteResponse {
+  bool success = 1;
+}
+
+// ─────────────────────────────────────────────
+// ReplicateEntry
+// ─────────────────────────────────────────────
+message LogEntry {
+  uint64 seqNum    = 1; // monotonically increasing log index
+  string operation = 2; // "PUT" | "DELETE"
+  string key       = 3;
+  bytes  value     = 4; // empty for DELETE
+  string term      = 5; // leader term (useful for Raft-style consensus)
+}
+
+message ReplicateEntryRequest {
+  LogEntry entry = 1;
+}
+
+message ReplicateEntryResponse {
+  bool   success      = 1;
+  string error_detail = 2; // populated on failure
+}
+
+// ─────────────────────────────────────────────
+// Heartbeat
+// ─────────────────────────────────────────────
+message HeartbeatRequest {
+  string node_id   = 1;
+  int64  timestamp = 2; // Unix millis — lets the receiver detect clock skew
+}
+
+message HeartbeatResponse {
+  string node_id   = 1; // echo back so the sender can correlate replies
+  bool   alive     = 2;
+  int64  timestamp = 3; // Unix millis at response time
+}
