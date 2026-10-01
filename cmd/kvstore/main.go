@@ -45,11 +45,47 @@ func main() {
 		log.Fatalf("Failed to open storage engine: %v", err)
 	}
 
-	service := service.NewService(engine)
+	// Determine this node's key range and leadership role from the shard config.
+	var minKey, maxKey string
+	isLeader := false
+	for _, shard := range config.cluster.shards {
+		if shard.leader == config.server.nodeId {
+			minKey = shard.startKey
+			maxKey = shard.endKey
+			isLeader = true
+			break
+		}
+		for _, follower := range shard.followers {
+			if follower == config.server.nodeId {
+				minKey = shard.startKey
+				maxKey = shard.endKey
+				// isLeader stays false
+				break
+			}
+		}
+		if minKey != "" {
+			break
+		}
+	}
 
-	storeCtrl := ctrl.NewStoreController(service)
+	// Build a NodeClientAdapter pointed at the first peer node, if any.
+	var nodeClient service.NodeClient
+	for _, node := range config.cluster.nodes {
+		if node.id != config.server.nodeId {
+			adapter, adapterErr := grpcInterface.NewNodeClientAdapter(node.grpcAddr)
+			if adapterErr != nil {
+				log.Fatalf("Failed to connect to peer node %s at %s: %v", node.id, node.grpcAddr, adapterErr)
+			}
+			nodeClient = adapter
+			break // single-peer for now; extend to a router for multi-shard
+		}
+	}
+
+	svc := service.NewService(engine, nodeClient, minKey, maxKey, isLeader)
+
+	storeCtrl := ctrl.NewStoreController(svc)
 	monCtrl := ctrl.NewMonitoringController(engine)
-	grpcSrv := grpcInterface.NewGRPCServer(service)
+	grpcSrv := grpcInterface.NewGRPCServer(svc)
 
 	kvstore := kvstore.NewKVStore(storeCtrl, monCtrl, grpcSrv, config.server.nodeId)
 

@@ -21,17 +21,25 @@ cluster:
 
   shards:
     - id: shard-1
-      start_key: A
-      end_key: H
+      start_key: ""  # no lower bound — owns everything before "I"
+      end_key: "I"   # exclusive: "H", "Hello", "Hz" all belong here
       leader: kvstore-0
       followers:
         - kvstore-1
         - kvstore-2
 
     - id: shard-2
-      start_key: I
-      end_key: P
+      start_key: "I"
+      end_key: "Q"   # exclusive: "P", "Python", "Pzzz" all belong here
       leader: kvstore-1
       followers:
         - kvstore-0
         - kvstore-2
+
+    - id: shard-3
+      start_key: "Q"
+      end_key: ""    # no upper bound — owns everything from "Q" onwards
+      leader: kvstore-2
+      followers:
+        - kvstore-0
+        - kvstore-1
