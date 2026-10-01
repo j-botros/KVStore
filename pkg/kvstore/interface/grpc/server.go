@@ -15,6 +15,10 @@ type GRPCServer struct {
 	service *service.Service
 }
 
+func NewGRPCServer(service *service.Service) *GRPCServer {
+	return &GRPCServer{service: service}
+}
+
 func (s *GRPCServer) ForwardGet(ctx context.Context, req *ForwardGetRequest) (*ForwardGetResponse, error) {
 	val, err := s.service.Get(req.Key)
 	if errors.Is(err, service.ErrNotFound) {

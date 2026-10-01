@@ -2,6 +2,7 @@ package main
 
 import (
 	"kvstore/pkg/kvstore"
+	grpcInterface "kvstore/pkg/kvstore/interface/grpc"
 	ctrl "kvstore/pkg/kvstore/interface/http"
 	service "kvstore/pkg/kvstore/service"
 	storageengine "kvstore/pkg/kvstore/storageEngine"
@@ -48,10 +49,11 @@ func main() {
 
 	storeCtrl := ctrl.NewStoreController(service)
 	monCtrl := ctrl.NewMonitoringController(engine)
+	grpcSrv := grpcInterface.NewGRPCServer(service)
 
-	kvstore := kvstore.NewKVStore(storeCtrl, monCtrl)
+	kvstore := kvstore.NewKVStore(storeCtrl, monCtrl, grpcSrv, config.server.nodeId)
 
-	err = kvstore.Start(config.server.httpPort, config.server.nodeId)
+	err = kvstore.Start(config.server.httpPort, config.server.grpcPort)
 	if err != nil {
 		log.Fatalf("Server failed to start: %v", err)
 	}
