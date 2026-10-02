@@ -31,7 +31,7 @@ To return the most recent version of a key, the storage engine queries component
 
 ## File Structure & Components
 
-### `storageEngine.go`
+### `storage_engine.go`
 The orchestrator of the entire system. It ties the WAL, Memtable, and SSTables together safely under a unified `StorageEngine` struct.
 - **Key Structs**: `StorageEngine`, `memlog` (a pairing of a memtable and a WAL).
 - **Important Methods**:
@@ -62,11 +62,11 @@ The heavy-lifter for disk I/O, binary searching, and leveled compaction logic.
   - `sst.search()`: Checks the bloom filter and executes a binary search on the file's index blocks.
   - `sst.compact()`: The core two-pointer merge algorithm for merging multiple sorted SST streams.
 
-### `bloomFilter.go`
+### `bloom_filter.go`
 A space-efficient probabilistic data structure used inside each SSTable to prevent unnecessary, expensive disk reads for keys that don't exist in that file.
 - **Key Structs**: `bloomFilter`.
 
-### `engineErrors.go`
+### `engine_errors.go`
 Defines the package's sentinel errors, such as `ErrKeyNotFound`, which the API layer checks for to return `404 Not Found` HTTP codes.
 
 ### `*_test.go`

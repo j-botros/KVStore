@@ -19,7 +19,7 @@ The service layer **never imports** `interface/grpc` or `interface/http`. Transp
 | File | Purpose |
 |---|---|
 | `service.go` | `Service` struct, constructor, `Get` / `Put` / `Delete`, `NodeClient` interface |
-| `serviceErrors.go` | Sentinel errors (`ErrNotFound`, `ErrReadOnly`) |
+| `service_errors.go` | Sentinel errors (`ErrNotFound`, `ErrReadOnly`) |
 
 ---
 
