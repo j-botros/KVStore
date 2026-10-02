@@ -12,9 +12,10 @@ import (
 )
 
 type Service struct {
-	engine     *storageengine.StorageEngine
-	nodeClient NodeClient   // forwards requests for keys this node doesn't own
-	followers  []NodeClient // peers that receive replication entries from this leader
+	engine       *storageengine.StorageEngine
+	router       *ShardRouter // routes reads/writes to the correct remote shard
+	leaderClient NodeClient   // this shard's leader; non-nil only when isLeader == false
+	followers    []NodeClient // peers that receive replication entries from this leader
 
 	minKey   string
 	maxKey   string
@@ -25,18 +26,20 @@ type Service struct {
 
 func NewService(
 	engine *storageengine.StorageEngine,
-	nodeClient NodeClient,
+	router *ShardRouter,
+	leaderClient NodeClient,
 	minKey, maxKey string,
 	isLeader bool,
 	followers []NodeClient,
 ) *Service {
 	return &Service{
-		engine:     engine,
-		nodeClient: nodeClient,
-		followers:  followers,
-		minKey:     minKey,
-		maxKey:     maxKey,
-		isLeader:   isLeader,
+		engine:       engine,
+		router:       router,
+		leaderClient: leaderClient,
+		followers:    followers,
+		minKey:       minKey,
+		maxKey:       maxKey,
+		isLeader:     isLeader,
 	}
 }
 
@@ -50,12 +53,18 @@ func (s *Service) ownsKey(key string) bool {
 	return aboveMin && belowMax
 }
 
+// Get reads a value by key.
+//   - If the key belongs to a remote shard, the read is forwarded pseudo-fairly
+//     across all nodes (leader + followers) of that shard via the ShardRouter.
+//   - If the key belongs to this shard, it is served locally regardless of
+//     whether this node is the leader or a follower (both can serve reads).
 func (s *Service) Get(key string) ([]byte, error) {
 	if !s.ownsKey(key) {
-		if s.nodeClient == nil {
-			return nil, fmt.Errorf("key %q is out of range and no peer node is configured", key)
+		peer, err := s.router.RouteRead(key)
+		if err != nil {
+			return nil, err
 		}
-		value, found, err := s.nodeClient.ForwardGet(context.Background(), key)
+		value, found, err := peer.ForwardGet(context.Background(), key)
 		if err != nil {
 			return nil, err
 		}
@@ -74,22 +83,32 @@ func (s *Service) Get(key string) ([]byte, error) {
 	return value, nil
 }
 
+// Put writes a key-value pair.
+//   - If the key belongs to a remote shard, the write is forwarded to that
+//     shard's leader via the ShardRouter.
+//   - If the key belongs to this shard but this node is a follower, the write
+//     is proxied to this shard's leader via leaderClient.
+//   - If the key belongs to this shard and this node is the leader, the write
+//     is applied locally and replicated to followers asynchronously.
 func (s *Service) Put(key string, value []byte) error {
 	if !s.ownsKey(key) {
-		if s.nodeClient == nil {
-			return fmt.Errorf("key %q is out of range and no peer node is configured", key)
+		leader, err := s.router.RouteWrite(key)
+		if err != nil {
+			return err
 		}
-		return s.nodeClient.ForwardPut(context.Background(), key, value)
+		return leader.ForwardPut(context.Background(), key, value)
 	}
 
 	if !s.isLeader {
-		return ErrReadOnly
+		if s.leaderClient == nil {
+			return ErrReadOnly
+		}
+		return s.leaderClient.ForwardPut(context.Background(), key, value)
 	}
 
 	if err := s.engine.Put(key, value); err != nil {
 		return err
 	}
-
 	s.replicateAsync(LogEntry{
 		SeqNum:    s.seqNum.Add(1),
 		Operation: "PUT",
@@ -99,16 +118,27 @@ func (s *Service) Put(key string, value []byte) error {
 	return nil
 }
 
+// Delete removes a key.
+//   - If the key belongs to a remote shard, the delete is forwarded to that
+//     shard's leader via the ShardRouter.
+//   - If the key belongs to this shard but this node is a follower, the delete
+//     is proxied to this shard's leader via leaderClient.
+//   - If the key belongs to this shard and this node is the leader, the delete
+//     is applied locally and replicated to followers asynchronously.
 func (s *Service) Delete(key string) error {
 	if !s.ownsKey(key) {
-		if s.nodeClient == nil {
-			return fmt.Errorf("key %q is out of range and no peer node is configured", key)
+		leader, err := s.router.RouteWrite(key)
+		if err != nil {
+			return err
 		}
-		return s.nodeClient.ForwardDelete(context.Background(), key)
+		return leader.ForwardDelete(context.Background(), key)
 	}
 
 	if !s.isLeader {
-		return ErrReadOnly
+		if s.leaderClient == nil {
+			return ErrReadOnly
+		}
+		return s.leaderClient.ForwardDelete(context.Background(), key)
 	}
 
 	err := s.engine.Delete(key)
@@ -118,7 +148,6 @@ func (s *Service) Delete(key string) error {
 	if err != nil {
 		return err
 	}
-
 	s.replicateAsync(LogEntry{
 		SeqNum:    s.seqNum.Add(1),
 		Operation: "DELETE",

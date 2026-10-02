@@ -92,26 +92,83 @@ func main() {
 		}
 	}
 
-	// Build a NodeClientAdapter for request forwarding (first peer node that is
-	// a leader of a different shard). Used to forward out-of-range keys.
-	var nodeClient service.NodeClient
+	// Build a ShardRouter for forwarding reads and writes to remote shards.
+	// Reads round-robin across all nodes; writes always target the shard leader.
+	var routerConfigs []service.ShardNodeConfig
 	for _, shard := range config.cluster.shards {
-		if shard.leader != config.server.nodeId {
+		// Skip this node's own shard — handled locally by Service.
+		isThisShard := shard.leader == config.server.nodeId
+		if !isThisShard {
+			for _, f := range shard.followers {
+				if f == config.server.nodeId {
+					isThisShard = true
+					break
+				}
+			}
+		}
+		if isThisShard {
+			continue
+		}
+
+		leaderAddr, ok := nodeAddrs[shard.leader]
+		if !ok {
+			log.Fatalf("No gRPC address found for shard leader %q", shard.leader)
+		}
+		leaderAdapter, adapterErr := grpcInterface.NewNodeClientAdapter(leaderAddr)
+		if adapterErr != nil {
+			log.Fatalf("Failed to connect to shard leader %s at %s: %v", shard.leader, leaderAddr, adapterErr)
+		}
+
+		shardConfig := service.ShardNodeConfig{
+			MinKey: shard.startKey,
+			MaxKey: shard.endKey,
+			Leader: leaderAdapter,
+		}
+		for _, followerId := range shard.followers {
+			addr, ok := nodeAddrs[followerId]
+			if !ok {
+				log.Printf("Warning: no gRPC address for follower %q, skipping", followerId)
+				continue
+			}
+			followerAdapter, adapterErr := grpcInterface.NewNodeClientAdapter(addr)
+			if adapterErr != nil {
+				log.Printf("Warning: failed to connect to follower %s at %s: %v", followerId, addr, adapterErr)
+				continue
+			}
+			shardConfig.Followers = append(shardConfig.Followers, followerAdapter)
+		}
+		routerConfigs = append(routerConfigs, shardConfig)
+	}
+	router := service.NewShardRouter(routerConfigs)
+
+	// Build a leaderClient so followers of this shard can proxy writes to the leader.
+	var leaderClient service.NodeClient
+	if !isLeader {
+		for _, shard := range config.cluster.shards {
+			isMyFollowerShard := false
+			for _, f := range shard.followers {
+				if f == config.server.nodeId {
+					isMyFollowerShard = true
+					break
+				}
+			}
+			if !isMyFollowerShard {
+				continue
+			}
 			addr, ok := nodeAddrs[shard.leader]
 			if !ok {
-				continue
+				log.Fatalf("No gRPC address for this shard's leader %q", shard.leader)
 			}
 			adapter, adapterErr := grpcInterface.NewNodeClientAdapter(addr)
 			if adapterErr != nil {
-				log.Fatalf("Failed to connect to peer node %s at %s: %v", shard.leader, addr, adapterErr)
+				log.Fatalf("Failed to connect to shard leader %s at %s: %v", shard.leader, addr, adapterErr)
 			}
-			nodeClient = adapter
-			break // single-peer for now; extend to a full router for multi-shard
+			leaderClient = adapter
+			break
 		}
 	}
 
-	svc := service.NewService(engine, nodeClient, minKey, maxKey, isLeader, followers)
-
+	svc := service.NewService(engine, router, leaderClient, minKey, maxKey, isLeader, followers)
 
 	storeCtrl := ctrl.NewStoreController(svc)
 	monCtrl := ctrl.NewMonitoringController(engine)
