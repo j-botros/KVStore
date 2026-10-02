@@ -3,6 +3,7 @@ package grpc
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	service "kvstore/pkg/kvstore/service"
 
@@ -61,6 +62,24 @@ func (a *NodeClientAdapter) ForwardDelete(ctx context.Context, key string) error
 	}
 	if !resp.Success {
 		return errors.New("remote delete reported failure")
+	}
+	return nil
+}
+
+func (a *NodeClientAdapter) ReplicateEntry(ctx context.Context, entry service.LogEntry) error {
+	resp, err := a.client.ReplicateEntry(ctx, &ReplicateEntryRequest{
+		Entry: &LogEntry{
+			SeqNum:    entry.SeqNum,
+			Operation: entry.Operation,
+			Key:       entry.Key,
+			Value:     entry.Value,
+		},
+	})
+	if err != nil {
+		return err
+	}
+	if !resp.Success {
+		return fmt.Errorf("follower replication failed: %s", resp.ErrorDetail)
 	}
 	return nil
 }

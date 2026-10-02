@@ -48,11 +48,13 @@ func main() {
 	// Determine this node's key range and leadership role from the shard config.
 	var minKey, maxKey string
 	isLeader := false
+	var followerIds []string
 	for _, shard := range config.cluster.shards {
 		if shard.leader == config.server.nodeId {
 			minKey = shard.startKey
 			maxKey = shard.endKey
 			isLeader = true
+			followerIds = shard.followers
 			break
 		}
 		for _, follower := range shard.followers {
@@ -68,20 +70,48 @@ func main() {
 		}
 	}
 
-	// Build a NodeClientAdapter pointed at the first peer node, if any.
-	var nodeClient service.NodeClient
+	// Build a lookup of node ID --> gRPC address.
+	nodeAddrs := make(map[string]string, len(config.cluster.nodes))
 	for _, node := range config.cluster.nodes {
-		if node.id != config.server.nodeId {
-			adapter, adapterErr := grpcInterface.NewNodeClientAdapter(node.grpcAddr)
-			if adapterErr != nil {
-				log.Fatalf("Failed to connect to peer node %s at %s: %v", node.id, node.grpcAddr, adapterErr)
+		nodeAddrs[node.id] = node.grpcAddr
+	}
+
+	// Build a NodeClientAdapter for each follower of this shard (leader only).
+	var followers []service.NodeClient
+	if isLeader {
+		for _, followerId := range followerIds {
+			addr, ok := nodeAddrs[followerId]
+			if !ok {
+				log.Fatalf("No gRPC address found for follower node %q", followerId)
 			}
-			nodeClient = adapter
-			break // single-peer for now; extend to a router for multi-shard
+			adapter, adapterErr := grpcInterface.NewNodeClientAdapter(addr)
+			if adapterErr != nil {
+				log.Fatalf("Failed to connect to follower %s at %s: %v", followerId, addr, adapterErr)
+			}
+			followers = append(followers, adapter)
 		}
 	}
 
-	svc := service.NewService(engine, nodeClient, minKey, maxKey, isLeader)
+	// Build a NodeClientAdapter for request forwarding (first peer node that is
+	// a leader of a different shard). Used to forward out-of-range keys.
+	var nodeClient service.NodeClient
+	for _, shard := range config.cluster.shards {
+		if shard.leader != config.server.nodeId {
+			addr, ok := nodeAddrs[shard.leader]
+			if !ok {
+				continue
+			}
+			adapter, adapterErr := grpcInterface.NewNodeClientAdapter(addr)
+			if adapterErr != nil {
+				log.Fatalf("Failed to connect to peer node %s at %s: %v", shard.leader, addr, adapterErr)
+			}
+			nodeClient = adapter
+			break // single-peer for now; extend to a full router for multi-shard
+		}
+	}
+
+	svc := service.NewService(engine, nodeClient, minKey, maxKey, isLeader, followers)
+
 
 	storeCtrl := ctrl.NewStoreController(svc)
 	monCtrl := ctrl.NewMonitoringController(engine)

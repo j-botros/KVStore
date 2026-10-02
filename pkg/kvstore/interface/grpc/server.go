@@ -19,6 +19,8 @@ func NewGRPCServer(service *service.Service) *GRPCServer {
 	return &GRPCServer{service: service}
 }
 
+// Request forwarding
+
 func (s *GRPCServer) ForwardGet(ctx context.Context, req *ForwardGetRequest) (*ForwardGetResponse, error) {
 	val, err := s.service.Get(req.Key)
 	if errors.Is(err, service.ErrNotFound) {
@@ -47,4 +49,24 @@ func (s *GRPCServer) ForwardDelete(ctx context.Context, req *ForwardDeleteReques
 		return &ForwardDeleteResponse{Success: false}, status.Errorf(codes.Internal, "delete failed: %v", err)
 	}
 	return &ForwardDeleteResponse{Success: true}, nil
+}
+
+// Replication
+
+func (s *GRPCServer) ReplicateEntry(ctx context.Context, req *ReplicateEntryRequest) (*ReplicateEntryResponse, error) {
+	entry := req.Entry
+	if entry == nil {
+		return &ReplicateEntryResponse{Success: false, ErrorDetail: "nil entry"}, nil
+	}
+
+	err := s.service.ReplicateEntry(service.LogEntry{
+		SeqNum:    entry.SeqNum,
+		Operation: entry.Operation,
+		Key:       entry.Key,
+		Value:     entry.Value,
+	})
+	if err != nil {
+		return &ReplicateEntryResponse{Success: false, ErrorDetail: err.Error()}, nil
+	}
+	return &ReplicateEntryResponse{Success: true}, nil
 }
