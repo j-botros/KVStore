@@ -22,7 +22,7 @@ func NewGRPCServer(service *service.Service) *GRPCServer {
 // Request Forwarding
 
 func (s *GRPCServer) ForwardGet(ctx context.Context, req *ForwardGetRequest) (*ForwardGetResponse, error) {
-	val, err := s.service.Get(req.Key)
+	val, err := s.service.Get(ctx, req.Key)
 	if errors.Is(err, service.ErrNotFound) {
 		return &ForwardGetResponse{Found: false}, nil
 	} else if err != nil {
@@ -36,7 +36,7 @@ func (s *GRPCServer) ForwardGet(ctx context.Context, req *ForwardGetRequest) (*F
 }
 
 func (s *GRPCServer) ForwardPut(ctx context.Context, req *ForwardPutRequest) (*ForwardPutResponse, error) {
-	err := s.service.Put(req.Key, req.Value)
+	err := s.service.Put(ctx, req.Key, req.Value)
 	if err != nil {
 		return &ForwardPutResponse{Success: false}, status.Errorf(codes.Internal, "put failed: %v", err)
 	}
@@ -44,7 +44,7 @@ func (s *GRPCServer) ForwardPut(ctx context.Context, req *ForwardPutRequest) (*F
 }
 
 func (s *GRPCServer) ForwardDelete(ctx context.Context, req *ForwardDeleteRequest) (*ForwardDeleteResponse, error) {
-	err := s.service.Delete(req.Key)
+	err := s.service.Delete(ctx, req.Key)
 	if err != nil && !errors.Is(err, service.ErrNotFound) {
 		return &ForwardDeleteResponse{Success: false}, status.Errorf(codes.Internal, "delete failed: %v", err)
 	}

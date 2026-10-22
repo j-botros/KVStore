@@ -8,6 +8,7 @@ import (
 	storageengine "kvstore/pkg/kvstore/storageEngine"
 	"log"
 	"os"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -170,7 +171,30 @@ func main() {
 
 	svc := service.NewService(engine, router, leaderClient, minKey, maxKey, isLeader, followers)
 
-	storeCtrl := ctrl.NewStoreController(svc)
+	// Build HTTP handler timeouts from config, falling back to safe defaults if
+	// the fields were omitted from config.yaml (zero value means not set).
+	const defaultGetTimeout = 5 * time.Second
+	const defaultPutTimeout = 10 * time.Second
+	const defaultDeleteTimeout = 10 * time.Second
+
+	getTimeout := time.Duration(config.server.timeouts.getTimeoutS) * time.Second
+	if getTimeout <= 0 {
+		getTimeout = defaultGetTimeout
+	}
+	putTimeout := time.Duration(config.server.timeouts.putTimeoutS) * time.Second
+	if putTimeout <= 0 {
+		putTimeout = defaultPutTimeout
+	}
+	deleteTimeout := time.Duration(config.server.timeouts.deleteTimeoutS) * time.Second
+	if deleteTimeout <= 0 {
+		deleteTimeout = defaultDeleteTimeout
+	}
+
+	storeCtrl := ctrl.NewStoreController(svc, ctrl.StoreTimeouts{
+		Get:    getTimeout,
+		Put:    putTimeout,
+		Delete: deleteTimeout,
+	})
 	monCtrl := ctrl.NewMonitoringController(engine)
 	grpcSrv := grpcInterface.NewGRPCServer(svc)
 
@@ -193,10 +217,17 @@ type config struct {
 }
 
 type serverConfig struct {
-	nodeId   string `yaml:"node_id"`
-	httpPort int    `yaml:"http_port"`
-	grpcPort int    `yaml:"grpc_port"`
-	dataDir  string `yaml:"data_dir"`
+	nodeId   string         `yaml:"node_id"`
+	httpPort int            `yaml:"http_port"`
+	grpcPort int            `yaml:"grpc_port"`
+	dataDir  string         `yaml:"data_dir"`
+	timeouts timeoutsConfig `yaml:"timeouts"`
+}
+
+type timeoutsConfig struct {
+	getTimeoutS    int `yaml:"get_timeout_s"`
+	putTimeoutS    int `yaml:"put_timeout_s"`
+	deleteTimeoutS int `yaml:"delete_timeout_s"`
 }
 
 type storageConfig struct {

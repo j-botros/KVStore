@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	service "kvstore/pkg/kvstore/service"
@@ -8,13 +9,22 @@ import (
 	"time"
 )
 
+// StoreTimeouts holds the per-operation deadline for HTTP handlers.
+// Values come from config.yaml; main.go applies defaults when a field is zero.
+type StoreTimeouts struct {
+	Get    time.Duration
+	Put    time.Duration
+	Delete time.Duration
+}
+
 type StoreController struct {
-	service *service.Service
+	service  *service.Service
+	timeouts StoreTimeouts
 }
 
 // Constructor
-func NewStoreController(service *service.Service) *StoreController {
-	return &StoreController{service: service}
+func NewStoreController(service *service.Service, timeouts StoreTimeouts) *StoreController {
+	return &StoreController{service: service, timeouts: timeouts}
 }
 
 // Register the routes
@@ -31,9 +41,14 @@ func (c *StoreController) handleGet(w http.ResponseWriter, r *http.Request) {
 		GetRequestsTotal.Inc()
 	}()
 
+	// r.Context() is already wired to cancel on client disconnect.
+	// WithTimeout adds a hard ceiling on top of that — whichever fires first wins.
+	ctx, cancel := context.WithTimeout(r.Context(), c.timeouts.Get)
+	defer cancel()
+
 	key := r.PathValue("key")
 
-	value, err := c.service.Get(key)
+	value, err := c.service.Get(ctx, key)
 	if errors.Is(err, service.ErrNotFound) {
 		http.Error(w, "key not found", http.StatusNotFound)
 		return
@@ -62,6 +77,9 @@ func (c *StoreController) handlePut(w http.ResponseWriter, r *http.Request) {
 		PutRequestsTotal.Inc()
 	}()
 
+	ctx, cancel := context.WithTimeout(r.Context(), c.timeouts.Put)
+	defer cancel()
+
 	key := r.PathValue("key")
 
 	var body putRequest
@@ -71,7 +89,7 @@ func (c *StoreController) handlePut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err = c.service.Put(key, []byte(body.Value))
+	err = c.service.Put(ctx, key, []byte(body.Value))
 	if err != nil {
 		http.Error(w, "failed to put key-value", http.StatusInternalServerError)
 		return
@@ -87,9 +105,12 @@ func (c *StoreController) handleDelete(w http.ResponseWriter, r *http.Request) {
 		DeleteRequestsTotal.Inc()
 	}()
 
+	ctx, cancel := context.WithTimeout(r.Context(), c.timeouts.Delete)
+	defer cancel()
+
 	key := r.PathValue("key")
 
-	err := c.service.Delete(key)
+	err := c.service.Delete(ctx, key)
 	if errors.Is(err, service.ErrNotFound) {
 		http.Error(w, "key not found", http.StatusNotFound)
 		return

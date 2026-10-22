@@ -3,6 +3,10 @@ server:
   http_port: 8080
   grpc_port: 9090
   data_dir: /data
+  timeouts:
+    get_timeout_s: 5
+    put_timeout_s: 10
+    delete_timeout_s: 10
 
 storage:
   memtable_size_mb: 64

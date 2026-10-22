@@ -19,7 +19,7 @@ type Service struct {
 
 	minKey   string
 	maxKey   string
-	isLeader bool
+	isLeader atomic.Bool
 
 	seqNum atomic.Uint64 // monotonically increasing log index for replication
 }
@@ -32,15 +32,17 @@ func NewService(
 	isLeader bool,
 	followers []NodeClient,
 ) *Service {
-	return &Service{
+	s := &Service{
 		engine:       engine,
 		router:       router,
 		leaderClient: leaderClient,
 		followers:    followers,
 		minKey:       minKey,
 		maxKey:       maxKey,
-		isLeader:     isLeader,
+		isLeader:     atomic.Bool{},
 	}
+	s.isLeader.Store(isLeader)
+	return s
 }
 
 // ownsKey reports whether this node is responsible for the given key.
@@ -58,13 +60,13 @@ func (s *Service) ownsKey(key string) bool {
 //     across all nodes (leader + followers) of that shard via the ShardRouter.
 //   - If the key belongs to this shard, it is served locally regardless of
 //     whether this node is the leader or a follower (both can serve reads).
-func (s *Service) Get(key string) ([]byte, error) {
+func (s *Service) Get(ctx context.Context, key string) ([]byte, error) {
 	if !s.ownsKey(key) {
 		peer, err := s.router.RouteRead(key)
 		if err != nil {
 			return nil, err
 		}
-		value, found, err := peer.ForwardGet(context.Background(), key)
+		value, found, err := peer.ForwardGet(ctx, key)
 		if err != nil {
 			return nil, err
 		}
@@ -90,20 +92,20 @@ func (s *Service) Get(key string) ([]byte, error) {
 //     is proxied to this shard's leader via leaderClient.
 //   - If the key belongs to this shard and this node is the leader, the write
 //     is applied locally and replicated to followers asynchronously.
-func (s *Service) Put(key string, value []byte) error {
+func (s *Service) Put(ctx context.Context, key string, value []byte) error {
 	if !s.ownsKey(key) {
 		leader, err := s.router.RouteWrite(key)
 		if err != nil {
 			return err
 		}
-		return leader.ForwardPut(context.Background(), key, value)
+		return leader.ForwardPut(ctx, key, value)
 	}
 
-	if !s.isLeader {
+	if !s.isLeader.Load() {
 		if s.leaderClient == nil {
 			return ErrReadOnly
 		}
-		return s.leaderClient.ForwardPut(context.Background(), key, value)
+		return s.leaderClient.ForwardPut(ctx, key, value)
 	}
 
 	if err := s.engine.Put(key, value); err != nil {
@@ -125,20 +127,20 @@ func (s *Service) Put(key string, value []byte) error {
 //     is proxied to this shard's leader via leaderClient.
 //   - If the key belongs to this shard and this node is the leader, the delete
 //     is applied locally and replicated to followers asynchronously.
-func (s *Service) Delete(key string) error {
+func (s *Service) Delete(ctx context.Context, key string) error {
 	if !s.ownsKey(key) {
 		leader, err := s.router.RouteWrite(key)
 		if err != nil {
 			return err
 		}
-		return leader.ForwardDelete(context.Background(), key)
+		return leader.ForwardDelete(ctx, key)
 	}
 
-	if !s.isLeader {
+	if !s.isLeader.Load() {
 		if s.leaderClient == nil {
 			return ErrReadOnly
 		}
-		return s.leaderClient.ForwardDelete(context.Background(), key)
+		return s.leaderClient.ForwardDelete(ctx, key)
 	}
 
 	err := s.engine.Delete(key)
@@ -172,6 +174,10 @@ func (s *Service) ReplicateEntry(entry LogEntry) error {
 	default:
 		return fmt.Errorf("unknown replication operation %q", entry.Operation)
 	}
+}
+
+func (s *Service) GetSeqnum() uint64 {
+	return s.seqNum.Load()
 }
 
 // replicateAsync fans out the log entry to all followers in background goroutines.
