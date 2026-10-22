@@ -600,6 +600,207 @@ func (x *HeartbeatResponse) GetTimestamp() int64 {
 	return 0
 }
 
+// Returns the current seqNum of a node so the caller can
+// identify which peer has the most up-to-date state.
+type GetSeqnumRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetSeqnumRequest) Reset() {
+	*x = GetSeqnumRequest{}
+	mi := &file_pkg_kvstore_interface_grpc_kvstore_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetSeqnumRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetSeqnumRequest) ProtoMessage() {}
+
+func (x *GetSeqnumRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_pkg_kvstore_interface_grpc_kvstore_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetSeqnumRequest.ProtoReflect.Descriptor instead.
+func (*GetSeqnumRequest) Descriptor() ([]byte, []int) {
+	return file_pkg_kvstore_interface_grpc_kvstore_proto_rawDescGZIP(), []int{11}
+}
+
+type GetSeqnumResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	SeqNum        uint64                 `protobuf:"varint,1,opt,name=seq_num,json=seqNum,proto3" json:"seq_num,omitempty"`
+	NodeId        string                 `protobuf:"bytes,2,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetSeqnumResponse) Reset() {
+	*x = GetSeqnumResponse{}
+	mi := &file_pkg_kvstore_interface_grpc_kvstore_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetSeqnumResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetSeqnumResponse) ProtoMessage() {}
+
+func (x *GetSeqnumResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_pkg_kvstore_interface_grpc_kvstore_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetSeqnumResponse.ProtoReflect.Descriptor instead.
+func (*GetSeqnumResponse) Descriptor() ([]byte, []int) {
+	return file_pkg_kvstore_interface_grpc_kvstore_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *GetSeqnumResponse) GetSeqNum() uint64 {
+	if x != nil {
+		return x.SeqNum
+	}
+	return 0
+}
+
+func (x *GetSeqnumResponse) GetNodeId() string {
+	if x != nil {
+		return x.NodeId
+	}
+	return ""
+}
+
+type ReplayRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The seqNum the recovering node had before it crashed.
+	// Reserved for future delta-replay optimisation; ignored for now.
+	RecoveringSeqNum uint64 `protobuf:"varint,1,opt,name=recovering_seq_num,json=recoveringSeqNum,proto3" json:"recovering_seq_num,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
+}
+
+func (x *ReplayRequest) Reset() {
+	*x = ReplayRequest{}
+	mi := &file_pkg_kvstore_interface_grpc_kvstore_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ReplayRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReplayRequest) ProtoMessage() {}
+
+func (x *ReplayRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_pkg_kvstore_interface_grpc_kvstore_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReplayRequest.ProtoReflect.Descriptor instead.
+func (*ReplayRequest) Descriptor() ([]byte, []int) {
+	return file_pkg_kvstore_interface_grpc_kvstore_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *ReplayRequest) GetRecoveringSeqNum() uint64 {
+	if x != nil {
+		return x.RecoveringSeqNum
+	}
+	return 0
+}
+
+// One streamed batch of KV entries.
+type ReplayChunk struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// seqNum of the donor at snapshot start — set only on the first chunk.
+	// The recovering node adopts this value as its own seqNum after applying
+	// the full snapshot.
+	SenderSeqNum uint64 `protobuf:"varint,1,opt,name=sender_seq_num,json=senderSeqNum,proto3" json:"sender_seq_num,omitempty"`
+	// A batch of live key-value pairs, each encoded as a PUT LogEntry.
+	Entries       []*LogEntry `protobuf:"bytes,2,rep,name=entries,proto3" json:"entries,omitempty"`
+	IsLast        bool        `protobuf:"varint,3,opt,name=is_last,json=isLast,proto3" json:"is_last,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ReplayChunk) Reset() {
+	*x = ReplayChunk{}
+	mi := &file_pkg_kvstore_interface_grpc_kvstore_proto_msgTypes[14]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ReplayChunk) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReplayChunk) ProtoMessage() {}
+
+func (x *ReplayChunk) ProtoReflect() protoreflect.Message {
+	mi := &file_pkg_kvstore_interface_grpc_kvstore_proto_msgTypes[14]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReplayChunk.ProtoReflect.Descriptor instead.
+func (*ReplayChunk) Descriptor() ([]byte, []int) {
+	return file_pkg_kvstore_interface_grpc_kvstore_proto_rawDescGZIP(), []int{14}
+}
+
+func (x *ReplayChunk) GetSenderSeqNum() uint64 {
+	if x != nil {
+		return x.SenderSeqNum
+	}
+	return 0
+}
+
+func (x *ReplayChunk) GetEntries() []*LogEntry {
+	if x != nil {
+		return x.Entries
+	}
+	return nil
+}
+
+func (x *ReplayChunk) GetIsLast() bool {
+	if x != nil {
+		return x.IsLast
+	}
+	return false
+}
+
 var File_pkg_kvstore_interface_grpc_kvstore_proto protoreflect.FileDescriptor
 
 const file_pkg_kvstore_interface_grpc_kvstore_proto_rawDesc = "" +
@@ -636,7 +837,17 @@ const file_pkg_kvstore_interface_grpc_kvstore_proto_rawDesc = "" +
 	"\x11HeartbeatResponse\x12\x17\n" +
 	"\anode_id\x18\x01 \x01(\tR\x06nodeId\x12\x14\n" +
 	"\x05alive\x18\x02 \x01(\bR\x05alive\x12\x1c\n" +
-	"\ttimestamp\x18\x03 \x01(\x03R\ttimestamp2\xb0\x03\n" +
+	"\ttimestamp\x18\x03 \x01(\x03R\ttimestamp\"\x12\n" +
+	"\x10GetSeqnumRequest\"E\n" +
+	"\x11GetSeqnumResponse\x12\x17\n" +
+	"\aseq_num\x18\x01 \x01(\x04R\x06seqNum\x12\x17\n" +
+	"\anode_id\x18\x02 \x01(\tR\x06nodeId\"=\n" +
+	"\rReplayRequest\x12,\n" +
+	"\x12recovering_seq_num\x18\x01 \x01(\x04R\x10recoveringSeqNum\"~\n" +
+	"\vReplayChunk\x12$\n" +
+	"\x0esender_seq_num\x18\x01 \x01(\x04R\fsenderSeqNum\x120\n" +
+	"\aentries\x18\x02 \x03(\v2\x16.kvstore.grpc.LogEntryR\aentries\x12\x17\n" +
+	"\ais_last\x18\x03 \x01(\bR\x06isLast2\xc2\x04\n" +
 	"\aKVStore\x12O\n" +
 	"\n" +
 	"ForwardGet\x12\x1f.kvstore.grpc.ForwardGetRequest\x1a .kvstore.grpc.ForwardGetResponse\x12O\n" +
@@ -644,7 +855,9 @@ const file_pkg_kvstore_interface_grpc_kvstore_proto_rawDesc = "" +
 	"ForwardPut\x12\x1f.kvstore.grpc.ForwardPutRequest\x1a .kvstore.grpc.ForwardPutResponse\x12X\n" +
 	"\rForwardDelete\x12\".kvstore.grpc.ForwardDeleteRequest\x1a#.kvstore.grpc.ForwardDeleteResponse\x12[\n" +
 	"\x0eReplicateEntry\x12#.kvstore.grpc.ReplicateEntryRequest\x1a$.kvstore.grpc.ReplicateEntryResponse\x12L\n" +
-	"\tHeartbeat\x12\x1e.kvstore.grpc.HeartbeatRequest\x1a\x1f.kvstore.grpc.HeartbeatResponseB$Z\"kvstore/pkg/kvstore/interface/grpcb\x06proto3"
+	"\tHeartbeat\x12\x1e.kvstore.grpc.HeartbeatRequest\x1a\x1f.kvstore.grpc.HeartbeatResponse\x12L\n" +
+	"\tGetSeqnum\x12\x1e.kvstore.grpc.GetSeqnumRequest\x1a\x1f.kvstore.grpc.GetSeqnumResponse\x12B\n" +
+	"\x06Replay\x12\x1b.kvstore.grpc.ReplayRequest\x1a\x19.kvstore.grpc.ReplayChunk0\x01B$Z\"kvstore/pkg/kvstore/interface/grpcb\x06proto3"
 
 var (
 	file_pkg_kvstore_interface_grpc_kvstore_proto_rawDescOnce sync.Once
@@ -658,7 +871,7 @@ func file_pkg_kvstore_interface_grpc_kvstore_proto_rawDescGZIP() []byte {
 	return file_pkg_kvstore_interface_grpc_kvstore_proto_rawDescData
 }
 
-var file_pkg_kvstore_interface_grpc_kvstore_proto_msgTypes = make([]protoimpl.MessageInfo, 11)
+var file_pkg_kvstore_interface_grpc_kvstore_proto_msgTypes = make([]protoimpl.MessageInfo, 15)
 var file_pkg_kvstore_interface_grpc_kvstore_proto_goTypes = []any{
 	(*ForwardGetRequest)(nil),      // 0: kvstore.grpc.ForwardGetRequest
 	(*ForwardGetResponse)(nil),     // 1: kvstore.grpc.ForwardGetResponse
@@ -671,24 +884,33 @@ var file_pkg_kvstore_interface_grpc_kvstore_proto_goTypes = []any{
 	(*ReplicateEntryResponse)(nil), // 8: kvstore.grpc.ReplicateEntryResponse
 	(*HeartbeatRequest)(nil),       // 9: kvstore.grpc.HeartbeatRequest
 	(*HeartbeatResponse)(nil),      // 10: kvstore.grpc.HeartbeatResponse
+	(*GetSeqnumRequest)(nil),       // 11: kvstore.grpc.GetSeqnumRequest
+	(*GetSeqnumResponse)(nil),      // 12: kvstore.grpc.GetSeqnumResponse
+	(*ReplayRequest)(nil),          // 13: kvstore.grpc.ReplayRequest
+	(*ReplayChunk)(nil),            // 14: kvstore.grpc.ReplayChunk
 }
 var file_pkg_kvstore_interface_grpc_kvstore_proto_depIdxs = []int32{
 	6,  // 0: kvstore.grpc.ReplicateEntryRequest.entry:type_name -> kvstore.grpc.LogEntry
-	0,  // 1: kvstore.grpc.KVStore.ForwardGet:input_type -> kvstore.grpc.ForwardGetRequest
-	2,  // 2: kvstore.grpc.KVStore.ForwardPut:input_type -> kvstore.grpc.ForwardPutRequest
-	4,  // 3: kvstore.grpc.KVStore.ForwardDelete:input_type -> kvstore.grpc.ForwardDeleteRequest
-	7,  // 4: kvstore.grpc.KVStore.ReplicateEntry:input_type -> kvstore.grpc.ReplicateEntryRequest
-	9,  // 5: kvstore.grpc.KVStore.Heartbeat:input_type -> kvstore.grpc.HeartbeatRequest
-	1,  // 6: kvstore.grpc.KVStore.ForwardGet:output_type -> kvstore.grpc.ForwardGetResponse
-	3,  // 7: kvstore.grpc.KVStore.ForwardPut:output_type -> kvstore.grpc.ForwardPutResponse
-	5,  // 8: kvstore.grpc.KVStore.ForwardDelete:output_type -> kvstore.grpc.ForwardDeleteResponse
-	8,  // 9: kvstore.grpc.KVStore.ReplicateEntry:output_type -> kvstore.grpc.ReplicateEntryResponse
-	10, // 10: kvstore.grpc.KVStore.Heartbeat:output_type -> kvstore.grpc.HeartbeatResponse
-	6,  // [6:11] is the sub-list for method output_type
-	1,  // [1:6] is the sub-list for method input_type
-	1,  // [1:1] is the sub-list for extension type_name
-	1,  // [1:1] is the sub-list for extension extendee
-	0,  // [0:1] is the sub-list for field type_name
+	6,  // 1: kvstore.grpc.ReplayChunk.entries:type_name -> kvstore.grpc.LogEntry
+	0,  // 2: kvstore.grpc.KVStore.ForwardGet:input_type -> kvstore.grpc.ForwardGetRequest
+	2,  // 3: kvstore.grpc.KVStore.ForwardPut:input_type -> kvstore.grpc.ForwardPutRequest
+	4,  // 4: kvstore.grpc.KVStore.ForwardDelete:input_type -> kvstore.grpc.ForwardDeleteRequest
+	7,  // 5: kvstore.grpc.KVStore.ReplicateEntry:input_type -> kvstore.grpc.ReplicateEntryRequest
+	9,  // 6: kvstore.grpc.KVStore.Heartbeat:input_type -> kvstore.grpc.HeartbeatRequest
+	11, // 7: kvstore.grpc.KVStore.GetSeqnum:input_type -> kvstore.grpc.GetSeqnumRequest
+	13, // 8: kvstore.grpc.KVStore.Replay:input_type -> kvstore.grpc.ReplayRequest
+	1,  // 9: kvstore.grpc.KVStore.ForwardGet:output_type -> kvstore.grpc.ForwardGetResponse
+	3,  // 10: kvstore.grpc.KVStore.ForwardPut:output_type -> kvstore.grpc.ForwardPutResponse
+	5,  // 11: kvstore.grpc.KVStore.ForwardDelete:output_type -> kvstore.grpc.ForwardDeleteResponse
+	8,  // 12: kvstore.grpc.KVStore.ReplicateEntry:output_type -> kvstore.grpc.ReplicateEntryResponse
+	10, // 13: kvstore.grpc.KVStore.Heartbeat:output_type -> kvstore.grpc.HeartbeatResponse
+	12, // 14: kvstore.grpc.KVStore.GetSeqnum:output_type -> kvstore.grpc.GetSeqnumResponse
+	14, // 15: kvstore.grpc.KVStore.Replay:output_type -> kvstore.grpc.ReplayChunk
+	9,  // [9:16] is the sub-list for method output_type
+	2,  // [2:9] is the sub-list for method input_type
+	2,  // [2:2] is the sub-list for extension type_name
+	2,  // [2:2] is the sub-list for extension extendee
+	0,  // [0:2] is the sub-list for field type_name
 }
 
 func init() { file_pkg_kvstore_interface_grpc_kvstore_proto_init() }
@@ -702,7 +924,7 @@ func file_pkg_kvstore_interface_grpc_kvstore_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_pkg_kvstore_interface_grpc_kvstore_proto_rawDesc), len(file_pkg_kvstore_interface_grpc_kvstore_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   11,
+			NumMessages:   15,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

@@ -19,7 +19,7 @@ func NewGRPCServer(service *service.Service) *GRPCServer {
 	return &GRPCServer{service: service}
 }
 
-// Request forwarding
+// Request Forwarding
 
 func (s *GRPCServer) ForwardGet(ctx context.Context, req *ForwardGetRequest) (*ForwardGetResponse, error) {
 	val, err := s.service.Get(req.Key)
@@ -51,7 +51,7 @@ func (s *GRPCServer) ForwardDelete(ctx context.Context, req *ForwardDeleteReques
 	return &ForwardDeleteResponse{Success: true}, nil
 }
 
-// Replication
+// Fault Tolerance
 
 func (s *GRPCServer) ReplicateEntry(ctx context.Context, req *ReplicateEntryRequest) (*ReplicateEntryResponse, error) {
 	entry := req.Entry

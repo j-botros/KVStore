@@ -19,6 +19,10 @@ service KVStore {
 
   // Cluster health — lightweight liveness ping between nodes.
   rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+
+  // Replay from replicated nodes
+  rpc GetSeqnum(GetSeqnumRequest) returns (GetSeqnumResponse);
+  rpc Replay(ReplayRequest)       returns (stream ReplayChunk); // Streaming RPC sends entries in batches
 }
 
 // ─────────────────────────────────────────────
@@ -88,4 +92,36 @@ message HeartbeatResponse {
   string node_id   = 1; // echo back so the sender can correlate replies
   bool   alive     = 2;
   int64  timestamp = 3; // Unix millis at response time
+}
+
+// ─────────────────────────────────────────────
+// Replay
+// ─────────────────────────────────────────────
+
+// Returns the current seqNum of a node so the caller can
+// identify which peer has the most up-to-date state.
+message GetSeqnumRequest { }
+
+message GetSeqnumResponse {
+  uint64 seq_num = 1;
+  string node_id = 2;
+}
+
+message ReplayRequest {
+  // The seqNum the recovering node had before it crashed.
+  // Reserved for future delta-replay optimisation; ignored for now.
+  uint64 recovering_seq_num = 1;
+}
+
+// One streamed batch of KV entries.
+message ReplayChunk {
+  // seqNum of the donor at snapshot start — set only on the first chunk.
+  // The recovering node adopts this value as its own seqNum after applying
+  // the full snapshot.
+  uint64 sender_seq_num = 1;
+
+  // A batch of live key-value pairs, each encoded as a PUT LogEntry.
+  repeated LogEntry entries = 2;
+
+  bool is_last = 3;
 }

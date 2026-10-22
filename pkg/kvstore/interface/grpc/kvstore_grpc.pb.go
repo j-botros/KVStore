@@ -24,6 +24,8 @@ const (
 	KVStore_ForwardDelete_FullMethodName  = "/kvstore.grpc.KVStore/ForwardDelete"
 	KVStore_ReplicateEntry_FullMethodName = "/kvstore.grpc.KVStore/ReplicateEntry"
 	KVStore_Heartbeat_FullMethodName      = "/kvstore.grpc.KVStore/Heartbeat"
+	KVStore_GetSeqnum_FullMethodName      = "/kvstore.grpc.KVStore/GetSeqnum"
+	KVStore_Replay_FullMethodName         = "/kvstore.grpc.KVStore/Replay"
 )
 
 // KVStoreClient is the client API for KVStore service.
@@ -43,6 +45,9 @@ type KVStoreClient interface {
 	ReplicateEntry(ctx context.Context, in *ReplicateEntryRequest, opts ...grpc.CallOption) (*ReplicateEntryResponse, error)
 	// Cluster health — lightweight liveness ping between nodes.
 	Heartbeat(ctx context.Context, in *HeartbeatRequest, opts ...grpc.CallOption) (*HeartbeatResponse, error)
+	// Replay from replicated nodes
+	GetSeqnum(ctx context.Context, in *GetSeqnumRequest, opts ...grpc.CallOption) (*GetSeqnumResponse, error)
+	Replay(ctx context.Context, in *ReplayRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ReplayChunk], error)
 }
 
 type kVStoreClient struct {
@@ -103,6 +108,35 @@ func (c *kVStoreClient) Heartbeat(ctx context.Context, in *HeartbeatRequest, opt
 	return out, nil
 }
 
+func (c *kVStoreClient) GetSeqnum(ctx context.Context, in *GetSeqnumRequest, opts ...grpc.CallOption) (*GetSeqnumResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetSeqnumResponse)
+	err := c.cc.Invoke(ctx, KVStore_GetSeqnum_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *kVStoreClient) Replay(ctx context.Context, in *ReplayRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ReplayChunk], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &KVStore_ServiceDesc.Streams[0], KVStore_Replay_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[ReplayRequest, ReplayChunk]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type KVStore_ReplayClient = grpc.ServerStreamingClient[ReplayChunk]
+
 // KVStoreServer is the server API for KVStore service.
 // All implementations must embed UnimplementedKVStoreServer
 // for forward compatibility.
@@ -120,6 +154,9 @@ type KVStoreServer interface {
 	ReplicateEntry(context.Context, *ReplicateEntryRequest) (*ReplicateEntryResponse, error)
 	// Cluster health — lightweight liveness ping between nodes.
 	Heartbeat(context.Context, *HeartbeatRequest) (*HeartbeatResponse, error)
+	// Replay from replicated nodes
+	GetSeqnum(context.Context, *GetSeqnumRequest) (*GetSeqnumResponse, error)
+	Replay(*ReplayRequest, grpc.ServerStreamingServer[ReplayChunk]) error
 	mustEmbedUnimplementedKVStoreServer()
 }
 
@@ -144,6 +181,12 @@ func (UnimplementedKVStoreServer) ReplicateEntry(context.Context, *ReplicateEntr
 }
 func (UnimplementedKVStoreServer) Heartbeat(context.Context, *HeartbeatRequest) (*HeartbeatResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Heartbeat not implemented")
+}
+func (UnimplementedKVStoreServer) GetSeqnum(context.Context, *GetSeqnumRequest) (*GetSeqnumResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetSeqnum not implemented")
+}
+func (UnimplementedKVStoreServer) Replay(*ReplayRequest, grpc.ServerStreamingServer[ReplayChunk]) error {
+	return status.Error(codes.Unimplemented, "method Replay not implemented")
 }
 func (UnimplementedKVStoreServer) mustEmbedUnimplementedKVStoreServer() {}
 func (UnimplementedKVStoreServer) testEmbeddedByValue()                 {}
@@ -256,6 +299,35 @@ func _KVStore_Heartbeat_Handler(srv interface{}, ctx context.Context, dec func(i
 	return interceptor(ctx, in, info, handler)
 }
 
+func _KVStore_GetSeqnum_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetSeqnumRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(KVStoreServer).GetSeqnum(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: KVStore_GetSeqnum_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(KVStoreServer).GetSeqnum(ctx, req.(*GetSeqnumRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _KVStore_Replay_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(ReplayRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(KVStoreServer).Replay(m, &grpc.GenericServerStream[ReplayRequest, ReplayChunk]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type KVStore_ReplayServer = grpc.ServerStreamingServer[ReplayChunk]
+
 // KVStore_ServiceDesc is the grpc.ServiceDesc for KVStore service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -283,7 +355,17 @@ var KVStore_ServiceDesc = grpc.ServiceDesc{
 			MethodName: "Heartbeat",
 			Handler:    _KVStore_Heartbeat_Handler,
 		},
+		{
+			MethodName: "GetSeqnum",
+			Handler:    _KVStore_GetSeqnum_Handler,
+		},
 	},
-	Streams:  []grpc.StreamDesc{},
+	Streams: []grpc.StreamDesc{
+		{
+			StreamName:    "Replay",
+			Handler:       _KVStore_Replay_Handler,
+			ServerStreams: true,
+		},
+	},
 	Metadata: "pkg/kvstore/interface/grpc/kvstore.proto",
 }
