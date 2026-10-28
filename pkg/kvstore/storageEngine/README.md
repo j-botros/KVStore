@@ -71,3 +71,33 @@ Defines the package's sentinel errors, such as `ErrKeyNotFound`, which the API l
 
 ### `*_test.go`
 Extensive testing suite for the engine. `testhelpers_test.go` provides mock configurations, while the other files test concurrent flushes, deadlocks, compaction serialization, and basic CRUD correctness.
+
+---
+
+## Future TODOs
+
+### Snapshot Isolation for `Scan` (Write-Blocking Issue)
+
+`StorageEngine.Scan()` holds `e.mu.RLock()` for its entire duration to guarantee a
+consistent view of the memtable pointers. Because `Put` and `Delete` take
+`e.mu.Lock()`, **all writes to the node are blocked while a scan is in progress**.
+
+This is significant for the recovery (`Replay`) path: the leader is the most
+up-to-date node and will be the scan donor. Scanning the leader stalls writes for
+the entire shard until the full snapshot transfer completes.
+
+**A production-grade fix: snapshot isolation via an epoch mechanism.**
+
+Instead of holding the read lock for the duration, `Scan` would:
+1. Under a brief lock, take a *snapshot* — copy the current memtable pointer and
+   the list of immutable memtable pointers. Increment an epoch counter.
+2. Release the lock immediately. New writes proceed against the active memtable
+   normally.
+3. Walk the snapshot memtables and SSTables without holding `e.mu`. The snapshot
+   pointers won't change because immutable memtables are never modified in place.
+4. Handle memtables that flush during the scan: a flushed immutable becomes an SST,
+   but both the snapshot pointer and the new SST contain the same data, so the
+   merge iterator can detect and skip the duplicate.
+
+This allows writes to continue uninterrupted during a recovery scan, at the cost
+of more complex iterator bookkeeping.

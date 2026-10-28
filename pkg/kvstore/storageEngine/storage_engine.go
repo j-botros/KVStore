@@ -3,6 +3,7 @@ package storageengine
 import (
 	"fmt"
 	"hash/crc32"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -350,6 +351,238 @@ func (e *StorageEngine) Delete(key string) error {
 	// Flush if Memtable is full
 	if e.active.memtable.sizeBytes >= e.memCapacity {
 		go func() { _ = e.flush() }()
+	}
+
+	return nil
+}
+
+/* ====================================================================================
+	SCAN METHOD
+==================================================================================== */
+
+// Scan iterates every live key-value pair in sorted key order.
+// yield is called once per live entry. If yield returns a non-nil error,
+// Scan stops immediately and returns that error.
+//
+// Scan acquires a read lock for its entire duration, which blocks concurrent
+// writes and flushes. See the storage engine README for the tradeoffs.
+//
+// Parameters:
+//   - yield (func(key string, value []byte) error): Callback invoked once per live entry.
+//
+// Returns:
+//   - error: The first error returned by yield, or nil if the scan completed.
+//
+// Errors:
+//   - Propagates any error returned by yield.
+//   - Propagates I/O errors from reading SSTable files.
+func (e *StorageEngine) Scan(yield func(key string, value []byte) error) error {
+	// Hold a single read lock for the full snapshot to prevent flushes from
+	// rotating memtables mid-scan.
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	// Collect 1 iterator head per memtable
+
+	type memIter struct{ curr *node }
+
+	allMems := make([]memIter, 0, 1+len(e.immutables))
+	if e.active.memtable.head.next[0] != nil {
+		allMems = append(allMems, memIter{e.active.memtable.head.next[0]})
+	}
+	for _, imm := range e.immutables {
+		if imm.memtable.head.next[0] != nil {
+			allMems = append(allMems, memIter{imm.memtable.head.next[0]})
+		}
+	}
+
+	// Collect 1 iterator head per SST across all levels
+	// Each sstIter keeps a file open and advances block-by-block via readEntry
+
+	type sstIter struct {
+		s    *sst
+		f    *os.File
+		rdr  *io.SectionReader
+		blkI int    // index into *s.index for the current block
+		head *entry // nil = exhausted
+	}
+
+	closeIter := func(it *sstIter) {
+		if it != nil && it.f != nil {
+			it.f.Close()
+			it.f = nil
+		}
+	}
+
+	openSstIter := func(s *sst) (*sstIter, error) {
+		filename := fmt.Sprintf("data/sstables/level-%d/%d.sst", s.level, s.filenum)
+		f, err := os.Open(filename)
+		if err != nil {
+			return nil, err
+		}
+		iter := &sstIter{s: s, f: f, blkI: 0}
+		if len(*s.index) == 0 {
+			f.Close()
+			return nil, nil // empty SST; skip it
+		}
+		blk := (*s.index)[0]
+		iter.rdr = io.NewSectionReader(f, int64(blk.offset), int64(blk.length))
+		e, err := readEntry(iter.rdr, e.crcTable)
+		if err == ErrEntryNotFound {
+			f.Close()
+			return nil, nil // empty SST; skip it
+		} else if err != nil {
+			f.Close()
+			return nil, err
+		} else {
+			iter.head = e
+		}
+		return iter, nil
+	}
+
+	// advanceSst reads the next entry from an sstIter, advancing blocks as needed.
+	// When an SST is exhausted, it closes the underlying file immediately.
+	advanceSst := func(it *sstIter) error {
+		e2, err := readEntry(it.rdr, e.crcTable)
+		if err == nil {
+			it.head = e2
+			return nil
+		}
+		if err != ErrEntryNotFound {
+			closeIter(it)
+			return err
+		}
+		// Current block exhausted; move to the next block.
+		for {
+			it.blkI++
+			if it.blkI >= len(*it.s.index) {
+				it.head = nil // SST fully exhausted
+				closeIter(it) // release file descriptor immediately
+				return nil
+			}
+			blk := (*it.s.index)[it.blkI]
+			it.rdr = io.NewSectionReader(it.f, int64(blk.offset), int64(blk.length))
+			e2, err = readEntry(it.rdr, e.crcTable)
+			if err == nil {
+				it.head = e2
+				return nil
+			} else if err == ErrEntryNotFound {
+				continue // empty block; try next
+			}
+			closeIter(it)
+			return err
+		}
+	}
+
+	// Snapshot SST metadata under sstables read lock, then open files without it.
+	e.sstables.mu.RLock()
+	var sstPtrs []*sst
+	for _, lvl := range e.sstables.levels {
+		for _, s := range lvl.sstList {
+			sstPtrs = append(sstPtrs, s)
+		}
+	}
+	e.sstables.mu.RUnlock()
+
+	allSsts := make([]*sstIter, 0, len(sstPtrs))
+	for _, s := range sstPtrs {
+		it, err := openSstIter(s)
+		if err != nil {
+			// Close any already-opened iters before returning.
+			for _, open := range allSsts {
+				closeIter(open)
+			}
+			return fmt.Errorf("Scan: open SST level-%d/%d: %w", s.level, s.filenum, err)
+		}
+		if it != nil {
+			allSsts = append(allSsts, it)
+		}
+	}
+
+	// Ensure all SST files are closed when Scan returns (e.g. on early abort or error).
+	defer func() {
+		for _, it := range allSsts {
+			closeIter(it)
+		}
+	}()
+
+	// k-way merge — pick the smallest key across all sources at each
+	// step, resolve duplicate keys by highest seq, skip tombstones.
+
+	for {
+		// Find the minimum key among all non-exhausted sources.
+		minKey := ""
+		found := false
+		for _, mi := range allMems {
+			if mi.curr == nil {
+				continue
+			}
+			if !found || mi.curr.key < minKey {
+				minKey = mi.curr.key
+				found = true
+			}
+		}
+		for _, it := range allSsts {
+			if it.head == nil {
+				continue
+			}
+			if !found || it.head.key < minKey {
+				minKey = it.head.key
+				found = true
+			}
+		}
+		if !found {
+			break // all sources exhausted
+		}
+
+		// Among all sources at minKey, pick the one with the highest seq.
+		winnerSeq := uint64(0)
+		winnerTombstone := false
+		var winnerValue []byte
+
+		for i := range allMems {
+			if allMems[i].curr == nil || allMems[i].curr.key != minKey {
+				continue
+			}
+			if allMems[i].curr.seq >= winnerSeq {
+				winnerSeq = allMems[i].curr.seq
+				winnerTombstone = allMems[i].curr.tombstone
+				winnerValue = allMems[i].curr.value
+			}
+		}
+		for _, it := range allSsts {
+			if it.head == nil || it.head.key != minKey {
+				continue
+			}
+			if it.head.seq >= winnerSeq {
+				winnerSeq = it.head.seq
+				winnerTombstone = it.head.tombstone
+				winnerValue = it.head.value
+			}
+		}
+
+		// Advance every source that was at minKey (discard stale duplicates).
+		for i := range allMems {
+			if allMems[i].curr != nil && allMems[i].curr.key == minKey {
+				allMems[i].curr = allMems[i].curr.next[0]
+			}
+		}
+		for _, it := range allSsts {
+			if it.head != nil && it.head.key == minKey {
+				if err := advanceSst(it); err != nil {
+					return fmt.Errorf("Scan: advance SST: %w", err)
+				}
+			}
+		}
+
+		// Skip tombstones — the key was deleted.
+		if winnerTombstone {
+			continue
+		}
+
+		if err := yield(minKey, winnerValue); err != nil {
+			return err
+		}
 	}
 
 	return nil

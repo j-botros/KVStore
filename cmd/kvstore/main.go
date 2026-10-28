@@ -196,7 +196,7 @@ func main() {
 		Delete: deleteTimeout,
 	})
 	monCtrl := ctrl.NewMonitoringController(engine)
-	grpcSrv := grpcInterface.NewGRPCServer(svc)
+	grpcSrv := grpcInterface.NewGRPCServer(config.server.nodeId, svc)
 
 	kvstore := kvstore.NewKVStore(storeCtrl, monCtrl, grpcSrv, config.server.nodeId)
 

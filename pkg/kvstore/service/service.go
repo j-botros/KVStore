@@ -176,8 +176,30 @@ func (s *Service) ReplicateEntry(entry LogEntry) error {
 	}
 }
 
+// Return sequence number.
+// Used for searching for the latest seqNum in a node.
 func (s *Service) GetSeqnum() uint64 {
 	return s.seqNum.Load()
+}
+
+// Scan iterates every live key-value pair in this node's storage engine.
+// The yield callback is called once per entry; returning a non-nil error
+// from yield aborts the scan and Scan returns that error.
+func (s *Service) Scan(yield func(key string, value []byte) error) error {
+	return s.engine.Scan(yield)
+}
+
+// Applies a single batch of entries.
+func (s *Service) ApplySnapshot(donorSeqNum uint64, entries []LogEntry, isFinal bool) error {
+	for _, e := range entries {
+		if err := s.engine.Put(e.Key, e.Value); err != nil {
+			return err
+		}
+	}
+	if isFinal {
+		s.seqNum.Store(donorSeqNum)
+	}
+	return nil
 }
 
 // replicateAsync fans out the log entry to all followers in background goroutines.
