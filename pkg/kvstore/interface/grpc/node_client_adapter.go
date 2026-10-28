@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 
 	coordinator "kvstore/pkg/kvstore/coordinator"
 
@@ -80,6 +81,53 @@ func (a *NodeClientAdapter) ReplicateEntry(ctx context.Context, entry coordinato
 	}
 	if !resp.Success {
 		return fmt.Errorf("follower replication failed: %s", resp.ErrorDetail)
+	}
+	return nil
+}
+
+func (a *NodeClientAdapter) GetSeqNum(ctx context.Context) (uint64, error) {
+	resp, err := a.client.GetSeqNum(ctx, &GetSeqNumRequest{})
+	if err != nil {
+		return 0, err
+	}
+	return resp.SeqNum, nil
+}
+
+func (a *NodeClientAdapter) ReplaySnapshot(
+	ctx context.Context,
+	recoveringSeqNum uint64,
+	onChunk func(donorSeqNum uint64, entries []coordinator.LogEntry, isLast bool) error,
+) error {
+	stream, err := a.client.Replay(ctx, &ReplayRequest{RecoveringSeqNum: recoveringSeqNum})
+	if err != nil {
+		return err
+	}
+
+	for {
+		chunk, err := stream.Recv()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return err
+		}
+
+		entries := make([]coordinator.LogEntry, 0, len(chunk.Entries))
+		for _, e := range chunk.Entries {
+			entries = append(entries, coordinator.LogEntry{
+				SeqNum:    e.SeqNum,
+				Operation: e.Operation,
+				Key:       e.Key,
+				Value:     e.Value,
+			})
+		}
+
+		if err := onChunk(chunk.SenderSeqNum, entries, chunk.IsLast); err != nil {
+			return err
+		}
+		if chunk.IsLast {
+			break
+		}
 	}
 	return nil
 }

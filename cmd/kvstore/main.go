@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"kvstore/pkg/kvstore"
 	coordinator "kvstore/pkg/kvstore/coordinator"
 	grpcInterface "kvstore/pkg/kvstore/interface/grpc"
@@ -170,6 +171,15 @@ func main() {
 	}
 
 	coord := coordinator.NewCoordinator(engine, router, leaderClient, minKey, maxKey, isLeader, followers)
+
+	// If this node is a follower, check if it needs to recover state from the leader before serving traffic.
+	if !isLeader && leaderClient != nil {
+		recoveryCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		if err := coord.RecoverIfNeeded(recoveryCtx); err != nil {
+			log.Printf("Warning: startup recovery from leader failed: %v", err)
+		}
+		cancel()
+	}
 
 	// Build HTTP handler timeouts from config, falling back to safe defaults if
 	// the fields were omitted from config.yaml (zero value means not set).

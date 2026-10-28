@@ -89,7 +89,7 @@ func (s *GRPCServer) Replay(req *ReplayRequest, stream KVStore_ReplayServer) err
 	// and the IsLast marker so the receiver knows the snapshot is complete.
 	return stream.Send(&ReplayChunk{
 		Entries:      batch,
-		SenderSeqNum: s.coordinator.GetSeqnum(),
+		SenderSeqNum: s.coordinator.GetSeqNum(),
 		IsLast:       true,
 	})
 }
@@ -112,12 +112,12 @@ func (s *GRPCServer) ReplicateEntry(ctx context.Context, req *ReplicateEntryRequ
 	return &ReplicateEntryResponse{Success: true}, nil
 }
 
-func (s *GRPCServer) GetReplicationStatus(
+func (s *GRPCServer) GetSeqNum(
 	ctx context.Context,
-	req *GetSeqnumRequest,
-) (*GetSeqnumResponse, error) {
-	return &GetSeqnumResponse{
-		SeqNum: s.coordinator.GetSeqnum(),
+	req *GetSeqNumRequest,
+) (*GetSeqNumResponse, error) {
+	return &GetSeqNumResponse{
+		SeqNum: s.coordinator.GetSeqNum(),
 		NodeId: s.nodeId,
 	}, nil
 }

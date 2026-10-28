@@ -24,7 +24,7 @@ const (
 	KVStore_ForwardDelete_FullMethodName  = "/kvstore.grpc.KVStore/ForwardDelete"
 	KVStore_ReplicateEntry_FullMethodName = "/kvstore.grpc.KVStore/ReplicateEntry"
 	KVStore_Heartbeat_FullMethodName      = "/kvstore.grpc.KVStore/Heartbeat"
-	KVStore_GetSeqnum_FullMethodName      = "/kvstore.grpc.KVStore/GetSeqnum"
+	KVStore_GetSeqNum_FullMethodName      = "/kvstore.grpc.KVStore/GetSeqNum"
 	KVStore_Replay_FullMethodName         = "/kvstore.grpc.KVStore/Replay"
 )
 
@@ -46,7 +46,7 @@ type KVStoreClient interface {
 	// Cluster health — lightweight liveness ping between nodes.
 	Heartbeat(ctx context.Context, in *HeartbeatRequest, opts ...grpc.CallOption) (*HeartbeatResponse, error)
 	// Replay from replicated nodes
-	GetSeqnum(ctx context.Context, in *GetSeqnumRequest, opts ...grpc.CallOption) (*GetSeqnumResponse, error)
+	GetSeqNum(ctx context.Context, in *GetSeqNumRequest, opts ...grpc.CallOption) (*GetSeqNumResponse, error)
 	Replay(ctx context.Context, in *ReplayRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ReplayChunk], error)
 }
 
@@ -108,10 +108,10 @@ func (c *kVStoreClient) Heartbeat(ctx context.Context, in *HeartbeatRequest, opt
 	return out, nil
 }
 
-func (c *kVStoreClient) GetSeqnum(ctx context.Context, in *GetSeqnumRequest, opts ...grpc.CallOption) (*GetSeqnumResponse, error) {
+func (c *kVStoreClient) GetSeqNum(ctx context.Context, in *GetSeqNumRequest, opts ...grpc.CallOption) (*GetSeqNumResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(GetSeqnumResponse)
-	err := c.cc.Invoke(ctx, KVStore_GetSeqnum_FullMethodName, in, out, cOpts...)
+	out := new(GetSeqNumResponse)
+	err := c.cc.Invoke(ctx, KVStore_GetSeqNum_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -155,7 +155,7 @@ type KVStoreServer interface {
 	// Cluster health — lightweight liveness ping between nodes.
 	Heartbeat(context.Context, *HeartbeatRequest) (*HeartbeatResponse, error)
 	// Replay from replicated nodes
-	GetSeqnum(context.Context, *GetSeqnumRequest) (*GetSeqnumResponse, error)
+	GetSeqNum(context.Context, *GetSeqNumRequest) (*GetSeqNumResponse, error)
 	Replay(*ReplayRequest, grpc.ServerStreamingServer[ReplayChunk]) error
 	mustEmbedUnimplementedKVStoreServer()
 }
@@ -182,8 +182,8 @@ func (UnimplementedKVStoreServer) ReplicateEntry(context.Context, *ReplicateEntr
 func (UnimplementedKVStoreServer) Heartbeat(context.Context, *HeartbeatRequest) (*HeartbeatResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Heartbeat not implemented")
 }
-func (UnimplementedKVStoreServer) GetSeqnum(context.Context, *GetSeqnumRequest) (*GetSeqnumResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method GetSeqnum not implemented")
+func (UnimplementedKVStoreServer) GetSeqNum(context.Context, *GetSeqNumRequest) (*GetSeqNumResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetSeqNum not implemented")
 }
 func (UnimplementedKVStoreServer) Replay(*ReplayRequest, grpc.ServerStreamingServer[ReplayChunk]) error {
 	return status.Error(codes.Unimplemented, "method Replay not implemented")
@@ -299,20 +299,20 @@ func _KVStore_Heartbeat_Handler(srv interface{}, ctx context.Context, dec func(i
 	return interceptor(ctx, in, info, handler)
 }
 
-func _KVStore_GetSeqnum_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(GetSeqnumRequest)
+func _KVStore_GetSeqNum_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetSeqNumRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(KVStoreServer).GetSeqnum(ctx, in)
+		return srv.(KVStoreServer).GetSeqNum(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: KVStore_GetSeqnum_FullMethodName,
+		FullMethod: KVStore_GetSeqNum_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(KVStoreServer).GetSeqnum(ctx, req.(*GetSeqnumRequest))
+		return srv.(KVStoreServer).GetSeqNum(ctx, req.(*GetSeqNumRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -356,8 +356,8 @@ var KVStore_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _KVStore_Heartbeat_Handler,
 		},
 		{
-			MethodName: "GetSeqnum",
-			Handler:    _KVStore_GetSeqnum_Handler,
+			MethodName: "GetSeqNum",
+			Handler:    _KVStore_GetSeqNum_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

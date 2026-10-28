@@ -21,7 +21,7 @@ service KVStore {
   rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
 
   // Replay from replicated nodes
-  rpc GetSeqnum(GetSeqnumRequest) returns (GetSeqnumResponse);
+  rpc GetSeqNum(GetSeqNumRequest) returns (GetSeqNumResponse);
   rpc Replay(ReplayRequest)       returns (stream ReplayChunk); // Streaming RPC sends entries in batches
 }
 
@@ -100,9 +100,9 @@ message HeartbeatResponse {
 
 // Returns the current seqNum of a node so the caller can
 // identify which peer has the most up-to-date state.
-message GetSeqnumRequest { }
+message GetSeqNumRequest { }
 
-message GetSeqnumResponse {
+message GetSeqNumResponse {
   uint64 seq_num = 1;
   string node_id = 2;
 }

@@ -178,7 +178,7 @@ func (c *Coordinator) ReplicateEntry(entry LogEntry) error {
 
 // Return sequence number.
 // Used for searching for the latest seqNum in a node.
-func (c *Coordinator) GetSeqnum() uint64 {
+func (c *Coordinator) GetSeqNum() uint64 {
 	return c.seqNum.Load()
 }
 
@@ -189,7 +189,7 @@ func (c *Coordinator) Scan(yield func(key string, value []byte) error) error {
 	return c.engine.Scan(yield)
 }
 
-// Applies a single batch of entries.
+// Applies a single batch of entries from a recovery snapshot.
 func (c *Coordinator) ApplySnapshot(donorSeqNum uint64, entries []LogEntry, isFinal bool) error {
 	for _, e := range entries {
 		if err := c.engine.Put(e.Key, e.Value); err != nil {
@@ -199,6 +199,39 @@ func (c *Coordinator) ApplySnapshot(donorSeqNum uint64, entries []LogEntry, isFi
 	if isFinal {
 		c.seqNum.Store(donorSeqNum)
 	}
+	return nil
+}
+
+// RecoverIfNeeded checks if this node is a follower that needs to synchronize
+// its data with the shard leader. If the node has no local data on disk or its
+// sequence number is behind the leader, it streams and applies a snapshot from the leader.
+func (c *Coordinator) RecoverIfNeeded(ctx context.Context) error {
+	if c.isLeader.Load() || c.leaderClient == nil {
+		return nil // Leaders and standalone nodes do not recover from a peer
+	}
+
+	leaderSeq, err := c.leaderClient.GetSeqNum(ctx)
+	if err != nil {
+		return fmt.Errorf("RecoverIfNeeded: query leader seqnum: %w", err)
+	}
+
+	stats := c.engine.Stats()
+	hasLocalData := stats.SstableDiskUsageBytes > 0 || stats.WalSizeBytes > 0 || stats.MemtableSizeBytes > 0 || stats.KeysTotal > 0
+	mySeq := c.GetSeqNum()
+
+	// If the leader has data (leaderSeq > 0) and this node has no data on disk
+	// (or is behind), apply the recovery snapshot.
+	if leaderSeq > 0 && (!hasLocalData || mySeq < leaderSeq) {
+		log.Printf("RecoverIfNeeded: follower node is behind leader (local seq=%d hasLocalData=%v, leader seq=%d). Initiating snapshot recovery...",
+			mySeq, hasLocalData, leaderSeq)
+
+		err := c.leaderClient.ReplaySnapshot(ctx, mySeq, c.ApplySnapshot)
+		if err != nil {
+			return fmt.Errorf("RecoverIfNeeded: apply snapshot: %w", err)
+		}
+		log.Printf("RecoverIfNeeded: snapshot recovery completed successfully. Node synced at seq=%d.", c.GetSeqNum())
+	}
+
 	return nil
 }
 
@@ -224,4 +257,10 @@ type NodeClient interface {
 	ForwardPut(ctx context.Context, key string, value []byte) error
 	ForwardDelete(ctx context.Context, key string) error
 	ReplicateEntry(ctx context.Context, entry LogEntry) error
+	GetSeqNum(ctx context.Context) (uint64, error)
+	ReplaySnapshot(
+		ctx context.Context,
+		recoveringSeqNum uint64,
+		onChunk func(donorSeqNum uint64, entries []LogEntry, isLast bool) error,
+	) error
 }
