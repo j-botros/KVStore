@@ -1,16 +1,16 @@
-# `service` package
+# `coordinator` package
 
-The `service` package contains the **core business logic** of the KVStore node. It sits in the middle of the dependency stack — above the storage engine, below the transport layer (HTTP/gRPC).
+The `coordinator` package contains the **core business logic** of the KVStore node. It sits in the middle of the dependency stack — above the storage engine, below the transport layer (HTTP/gRPC).
 
 ```
 cmd/kvstore/main.go
        │
        ├── interface/http     (HTTP controllers)  ──┐
-       ├── interface/grpc     (gRPC server)       ──┤──▶  service  ──▶  storageEngine
+       ├── interface/grpc     (gRPC server)       ──┤──▶  coordinator  ──▶  storageEngine
        └── kvstore.go         (lifecycle)         ──┘
 ```
 
-The service layer **never imports** `interface/grpc` or `interface/http`. Transport concerns stay outside; the service only knows about keys, values, and errors.
+The coordinator layer **never imports** `interface/grpc` or `interface/http`. Transport concerns stay outside; the coordinator only knows about keys, values, and errors.
 
 ---
 
@@ -18,8 +18,8 @@ The service layer **never imports** `interface/grpc` or `interface/http`. Transp
 
 | File | Purpose |
 |---|---|
-| `service.go` | `Service` struct, constructor, `Get` / `Put` / `Delete`, `NodeClient` interface |
-| `service_errors.go` | Sentinel errors (`ErrNotFound`, `ErrReadOnly`) |
+| `coordinator.go` | `Coordinator` struct, constructor, `Get` / `Put` / `Delete`, `NodeClient` interface |
+| `coordinator_errors.go` | Sentinel errors (`ErrNotFound`, `ErrReadOnly`) |
 
 ---
 
@@ -43,21 +43,21 @@ Each shard has one **leader** and zero or more **followers**:
 - **Leader** — accepts reads and writes for its key range.
 - **Follower** — accepts reads only. Writes return `ErrReadOnly`. Followers receive writes via `ReplicateEntry` from the leader (see TODO below).
 
-`isLeader` is resolved at startup from `config.yaml` and injected into the service via `NewService`.
+`isLeader` is resolved at startup from `config.yaml` and injected into the coordinator via `NewCoordinator`.
 
 ### `NodeClient` interface
 
-`Service` needs to communicate with other nodes (for request forwarding) without importing the `interface/grpc` package — that would create an import cycle since `interface/grpc` already imports `service`.
+`Coordinator` needs to communicate with other nodes (for request forwarding) without importing the `interface/grpc` package — that would create an import cycle since `interface/grpc` already imports `coordinator`.
 
-The solution is **dependency inversion**: `service` defines the `NodeClient` interface describing what it needs; the concrete `NodeClientAdapter` in `interface/grpc` satisfies it. `main.go` wires them together.
+The solution is **dependency inversion**: `coordinator` defines the `NodeClient` interface describing what it needs; the concrete `NodeClientAdapter` in `interface/grpc` satisfies it. `main.go` wires them together.
 
 ```
-interface/grpc (NodeClientAdapter) ──implements──▶ service.NodeClient
+interface/grpc (NodeClientAdapter) ──implements──▶ coordinator.NodeClient
 ```
 
 ---
 
-## How Requests Flow Through the Service Layer
+## How Requests Flow Through the Coordinator Layer
 
 ### Read (`Get`)
 
@@ -65,7 +65,7 @@ interface/grpc (NodeClientAdapter) ──implements──▶ service.NodeClient
 caller
   │
   ▼
-service.Get(key)
+coordinator.Get(key)
   │
   ├── ownsKey? ──NO──▶ nodeClient.ForwardGet(key)  ──▶  peer node
   │
@@ -84,7 +84,7 @@ service.Get(key)
 caller
   │
   ▼
-service.Put(key, value)
+coordinator.Put(key, value)
   │
   ├── ownsKey? ──NO──▶ nodeClient.ForwardPut(key, value)  ──▶  owning leader
   │
@@ -109,7 +109,7 @@ service.Put(key, value)
 | `ErrNotFound` | Key does not exist in the store | `Get`, `Delete` |
 | `ErrReadOnly` | This node is a follower; writes are rejected | `Put`, `Delete` |
 
-Callers in `interface/http` and `interface/grpc` use `errors.Is(err, service.ErrXxx)` to map these to appropriate HTTP status codes or gRPC status codes.
+Callers in `interface/http` and `interface/grpc` use `errors.Is(err, coordinator.ErrXxx)` to map these to appropriate HTTP status codes or gRPC status codes.
 
 ---
 

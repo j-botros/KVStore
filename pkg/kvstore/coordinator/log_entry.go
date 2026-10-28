@@ -1,4 +1,4 @@
-package service
+package coordinator
 
 // LogEntry represents a single write operation in the replication log.
 // NodeClientAdapter translates it to the wire format when sending to followers.

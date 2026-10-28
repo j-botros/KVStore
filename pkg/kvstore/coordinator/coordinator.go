@@ -1,4 +1,4 @@
-package service
+package coordinator
 
 import (
 	"context"
@@ -11,7 +11,7 @@ import (
 	storageengine "kvstore/pkg/kvstore/storageEngine"
 )
 
-type Service struct {
+type Coordinator struct {
 	engine       *storageengine.StorageEngine
 	router       *ShardRouter // routes reads/writes to the correct remote shard
 	leaderClient NodeClient   // this shard's leader; non-nil only when isLeader == false
@@ -24,15 +24,15 @@ type Service struct {
 	seqNum atomic.Uint64 // monotonically increasing log index for replication
 }
 
-func NewService(
+func NewCoordinator(
 	engine *storageengine.StorageEngine,
 	router *ShardRouter,
 	leaderClient NodeClient,
 	minKey, maxKey string,
 	isLeader bool,
 	followers []NodeClient,
-) *Service {
-	s := &Service{
+) *Coordinator {
+	c := &Coordinator{
 		engine:       engine,
 		router:       router,
 		leaderClient: leaderClient,
@@ -41,17 +41,17 @@ func NewService(
 		maxKey:       maxKey,
 		isLeader:     atomic.Bool{},
 	}
-	s.isLeader.Store(isLeader)
-	return s
+	c.isLeader.Store(isLeader)
+	return c
 }
 
 // ownsKey reports whether this node is responsible for the given key.
 // minKey == "" means no lower bound (owns everything up to maxKey).
 // maxKey == "" means no upper bound (owns everything from minKey onwards).
 // The upper bound is exclusive: a key equal to maxKey belongs to the next shard.
-func (s *Service) ownsKey(key string) bool {
-	aboveMin := s.minKey == "" || key >= s.minKey
-	belowMax := s.maxKey == "" || key < s.maxKey
+func (c *Coordinator) ownsKey(key string) bool {
+	aboveMin := c.minKey == "" || key >= c.minKey
+	belowMax := c.maxKey == "" || key < c.maxKey
 	return aboveMin && belowMax
 }
 
@@ -60,9 +60,9 @@ func (s *Service) ownsKey(key string) bool {
 //     across all nodes (leader + followers) of that shard via the ShardRouter.
 //   - If the key belongs to this shard, it is served locally regardless of
 //     whether this node is the leader or a follower (both can serve reads).
-func (s *Service) Get(ctx context.Context, key string) ([]byte, error) {
-	if !s.ownsKey(key) {
-		peer, err := s.router.RouteRead(key)
+func (c *Coordinator) Get(ctx context.Context, key string) ([]byte, error) {
+	if !c.ownsKey(key) {
+		peer, err := c.router.RouteRead(key)
 		if err != nil {
 			return nil, err
 		}
@@ -76,7 +76,7 @@ func (s *Service) Get(ctx context.Context, key string) ([]byte, error) {
 		return value, nil
 	}
 
-	value, err := s.engine.Get(key)
+	value, err := c.engine.Get(key)
 	if errors.Is(err, storageengine.ErrKeyNotFound) {
 		return nil, ErrNotFound
 	} else if err != nil {
@@ -92,27 +92,27 @@ func (s *Service) Get(ctx context.Context, key string) ([]byte, error) {
 //     is proxied to this shard's leader via leaderClient.
 //   - If the key belongs to this shard and this node is the leader, the write
 //     is applied locally and replicated to followers asynchronously.
-func (s *Service) Put(ctx context.Context, key string, value []byte) error {
-	if !s.ownsKey(key) {
-		leader, err := s.router.RouteWrite(key)
+func (c *Coordinator) Put(ctx context.Context, key string, value []byte) error {
+	if !c.ownsKey(key) {
+		leader, err := c.router.RouteWrite(key)
 		if err != nil {
 			return err
 		}
 		return leader.ForwardPut(ctx, key, value)
 	}
 
-	if !s.isLeader.Load() {
-		if s.leaderClient == nil {
+	if !c.isLeader.Load() {
+		if c.leaderClient == nil {
 			return ErrReadOnly
 		}
-		return s.leaderClient.ForwardPut(ctx, key, value)
+		return c.leaderClient.ForwardPut(ctx, key, value)
 	}
 
-	if err := s.engine.Put(key, value); err != nil {
+	if err := c.engine.Put(key, value); err != nil {
 		return err
 	}
-	s.replicateAsync(LogEntry{
-		SeqNum:    s.seqNum.Add(1),
+	c.replicateAsync(LogEntry{
+		SeqNum:    c.seqNum.Add(1),
 		Operation: "PUT",
 		Key:       key,
 		Value:     value,
@@ -127,31 +127,31 @@ func (s *Service) Put(ctx context.Context, key string, value []byte) error {
 //     is proxied to this shard's leader via leaderClient.
 //   - If the key belongs to this shard and this node is the leader, the delete
 //     is applied locally and replicated to followers asynchronously.
-func (s *Service) Delete(ctx context.Context, key string) error {
-	if !s.ownsKey(key) {
-		leader, err := s.router.RouteWrite(key)
+func (c *Coordinator) Delete(ctx context.Context, key string) error {
+	if !c.ownsKey(key) {
+		leader, err := c.router.RouteWrite(key)
 		if err != nil {
 			return err
 		}
 		return leader.ForwardDelete(ctx, key)
 	}
 
-	if !s.isLeader.Load() {
-		if s.leaderClient == nil {
+	if !c.isLeader.Load() {
+		if c.leaderClient == nil {
 			return ErrReadOnly
 		}
-		return s.leaderClient.ForwardDelete(ctx, key)
+		return c.leaderClient.ForwardDelete(ctx, key)
 	}
 
-	err := s.engine.Delete(key)
+	err := c.engine.Delete(key)
 	if errors.Is(err, storageengine.ErrKeyNotFound) {
 		return ErrNotFound
 	}
 	if err != nil {
 		return err
 	}
-	s.replicateAsync(LogEntry{
-		SeqNum:    s.seqNum.Add(1),
+	c.replicateAsync(LogEntry{
+		SeqNum:    c.seqNum.Add(1),
 		Operation: "DELETE",
 		Key:       key,
 	})
@@ -161,12 +161,12 @@ func (s *Service) Delete(ctx context.Context, key string) error {
 // ReplicateEntry applies an inbound replication entry from the leader directly
 // to the storage engine. It bypasses the isLeader guard — this path is only
 // reachable via the gRPC ReplicateEntry RPC, not from client-facing requests.
-func (s *Service) ReplicateEntry(entry LogEntry) error {
+func (c *Coordinator) ReplicateEntry(entry LogEntry) error {
 	switch entry.Operation {
 	case "PUT":
-		return s.engine.Put(entry.Key, entry.Value)
+		return c.engine.Put(entry.Key, entry.Value)
 	case "DELETE":
-		err := s.engine.Delete(entry.Key)
+		err := c.engine.Delete(entry.Key)
 		if errors.Is(err, storageengine.ErrKeyNotFound) {
 			return nil // idempotent: already absent is fine
 		}
@@ -178,34 +178,34 @@ func (s *Service) ReplicateEntry(entry LogEntry) error {
 
 // Return sequence number.
 // Used for searching for the latest seqNum in a node.
-func (s *Service) GetSeqnum() uint64 {
-	return s.seqNum.Load()
+func (c *Coordinator) GetSeqnum() uint64 {
+	return c.seqNum.Load()
 }
 
 // Scan iterates every live key-value pair in this node's storage engine.
 // The yield callback is called once per entry; returning a non-nil error
 // from yield aborts the scan and Scan returns that error.
-func (s *Service) Scan(yield func(key string, value []byte) error) error {
-	return s.engine.Scan(yield)
+func (c *Coordinator) Scan(yield func(key string, value []byte) error) error {
+	return c.engine.Scan(yield)
 }
 
 // Applies a single batch of entries.
-func (s *Service) ApplySnapshot(donorSeqNum uint64, entries []LogEntry, isFinal bool) error {
+func (c *Coordinator) ApplySnapshot(donorSeqNum uint64, entries []LogEntry, isFinal bool) error {
 	for _, e := range entries {
-		if err := s.engine.Put(e.Key, e.Value); err != nil {
+		if err := c.engine.Put(e.Key, e.Value); err != nil {
 			return err
 		}
 	}
 	if isFinal {
-		s.seqNum.Store(donorSeqNum)
+		c.seqNum.Store(donorSeqNum)
 	}
 	return nil
 }
 
 // replicateAsync fans out the log entry to all followers in background goroutines.
 // Failures are logged but do not block the caller (fire-and-forget).
-func (s *Service) replicateAsync(entry LogEntry) {
-	for _, follower := range s.followers {
+func (c *Coordinator) replicateAsync(entry LogEntry) {
+	for _, follower := range c.followers {
 		go func(f NodeClient) {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()

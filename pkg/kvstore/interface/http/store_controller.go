@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	service "kvstore/pkg/kvstore/service"
+	coordinator "kvstore/pkg/kvstore/coordinator"
 	"net/http"
 	"time"
 )
@@ -18,13 +18,13 @@ type StoreTimeouts struct {
 }
 
 type StoreController struct {
-	service  *service.Service
-	timeouts StoreTimeouts
+	coordinator *coordinator.Coordinator
+	timeouts    StoreTimeouts
 }
 
 // Constructor
-func NewStoreController(service *service.Service, timeouts StoreTimeouts) *StoreController {
-	return &StoreController{service: service, timeouts: timeouts}
+func NewStoreController(coordinator *coordinator.Coordinator, timeouts StoreTimeouts) *StoreController {
+	return &StoreController{coordinator: coordinator, timeouts: timeouts}
 }
 
 // Register the routes
@@ -48,8 +48,8 @@ func (c *StoreController) handleGet(w http.ResponseWriter, r *http.Request) {
 
 	key := r.PathValue("key")
 
-	value, err := c.service.Get(ctx, key)
-	if errors.Is(err, service.ErrNotFound) {
+	value, err := c.coordinator.Get(ctx, key)
+	if errors.Is(err, coordinator.ErrNotFound) {
 		http.Error(w, "key not found", http.StatusNotFound)
 		return
 	} else if err != nil {
@@ -89,7 +89,7 @@ func (c *StoreController) handlePut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err = c.service.Put(ctx, key, []byte(body.Value))
+	err = c.coordinator.Put(ctx, key, []byte(body.Value))
 	if err != nil {
 		http.Error(w, "failed to put key-value", http.StatusInternalServerError)
 		return
@@ -110,8 +110,8 @@ func (c *StoreController) handleDelete(w http.ResponseWriter, r *http.Request) {
 
 	key := r.PathValue("key")
 
-	err := c.service.Delete(ctx, key)
-	if errors.Is(err, service.ErrNotFound) {
+	err := c.coordinator.Delete(ctx, key)
+	if errors.Is(err, coordinator.ErrNotFound) {
 		http.Error(w, "key not found", http.StatusNotFound)
 		return
 	} else if err != nil {

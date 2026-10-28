@@ -1,4 +1,4 @@
-package service
+package coordinator
 
 import (
 	"fmt"
@@ -6,7 +6,7 @@ import (
 )
 
 // ShardNodeConfig describes a single remote shard and the NodeClients for its nodes.
-// Used to build a ShardRouter in main and passed into NewService.
+// Used to build a ShardRouter in main and passed into NewCoordinator.
 type ShardNodeConfig struct {
 	MinKey    string
 	MaxKey    string
@@ -39,7 +39,7 @@ type ShardRouter struct {
 }
 
 // NewShardRouter builds a ShardRouter from the given per-shard configurations.
-// Only include shards that this node does NOT own — the service handles its own
+// Only include shards that this node does NOT own — the coordinator handles its own
 // key range locally and will never call the router for those keys.
 func NewShardRouter(configs []ShardNodeConfig) *ShardRouter {
 	shards := make([]*shardInfo, 0, len(configs))

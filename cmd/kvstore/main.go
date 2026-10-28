@@ -2,9 +2,9 @@ package main
 
 import (
 	"kvstore/pkg/kvstore"
+	coordinator "kvstore/pkg/kvstore/coordinator"
 	grpcInterface "kvstore/pkg/kvstore/interface/grpc"
 	ctrl "kvstore/pkg/kvstore/interface/http"
-	service "kvstore/pkg/kvstore/service"
 	storageengine "kvstore/pkg/kvstore/storageEngine"
 	"log"
 	"os"
@@ -78,7 +78,7 @@ func main() {
 	}
 
 	// Build a NodeClientAdapter for each follower of this shard (leader only).
-	var followers []service.NodeClient
+	var followers []coordinator.NodeClient
 	if isLeader {
 		for _, followerId := range followerIds {
 			addr, ok := nodeAddrs[followerId]
@@ -95,9 +95,9 @@ func main() {
 
 	// Build a ShardRouter for forwarding reads and writes to remote shards.
 	// Reads round-robin across all nodes; writes always target the shard leader.
-	var routerConfigs []service.ShardNodeConfig
+	var routerConfigs []coordinator.ShardNodeConfig
 	for _, shard := range config.cluster.shards {
-		// Skip this node's own shard — handled locally by Service.
+		// Skip this node's own shard — handled locally by Coordinator.
 		isThisShard := shard.leader == config.server.nodeId
 		if !isThisShard {
 			for _, f := range shard.followers {
@@ -120,7 +120,7 @@ func main() {
 			log.Fatalf("Failed to connect to shard leader %s at %s: %v", shard.leader, leaderAddr, adapterErr)
 		}
 
-		shardConfig := service.ShardNodeConfig{
+		shardConfig := coordinator.ShardNodeConfig{
 			MinKey: shard.startKey,
 			MaxKey: shard.endKey,
 			Leader: leaderAdapter,
@@ -140,10 +140,10 @@ func main() {
 		}
 		routerConfigs = append(routerConfigs, shardConfig)
 	}
-	router := service.NewShardRouter(routerConfigs)
+	router := coordinator.NewShardRouter(routerConfigs)
 
 	// Build a leaderClient so followers of this shard can proxy writes to the leader.
-	var leaderClient service.NodeClient
+	var leaderClient coordinator.NodeClient
 	if !isLeader {
 		for _, shard := range config.cluster.shards {
 			isMyFollowerShard := false
@@ -169,7 +169,7 @@ func main() {
 		}
 	}
 
-	svc := service.NewService(engine, router, leaderClient, minKey, maxKey, isLeader, followers)
+	coord := coordinator.NewCoordinator(engine, router, leaderClient, minKey, maxKey, isLeader, followers)
 
 	// Build HTTP handler timeouts from config, falling back to safe defaults if
 	// the fields were omitted from config.yaml (zero value means not set).
@@ -190,13 +190,13 @@ func main() {
 		deleteTimeout = defaultDeleteTimeout
 	}
 
-	storeCtrl := ctrl.NewStoreController(svc, ctrl.StoreTimeouts{
+	storeCtrl := ctrl.NewStoreController(coord, ctrl.StoreTimeouts{
 		Get:    getTimeout,
 		Put:    putTimeout,
 		Delete: deleteTimeout,
 	})
 	monCtrl := ctrl.NewMonitoringController(engine)
-	grpcSrv := grpcInterface.NewGRPCServer(config.server.nodeId, svc)
+	grpcSrv := grpcInterface.NewGRPCServer(config.server.nodeId, coord)
 
 	kvstore := kvstore.NewKVStore(storeCtrl, monCtrl, grpcSrv, config.server.nodeId)
 

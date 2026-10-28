@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 
-	service "kvstore/pkg/kvstore/service"
+	coordinator "kvstore/pkg/kvstore/coordinator"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -14,12 +14,12 @@ import (
 )
 
 // NodeClientAdapter wraps the generated KVStoreClient and satisfies
-// service.NodeClient, keeping the grpc package out of the service layer.
+// coordinator.NodeClient, keeping the grpc package out of the coordinator layer.
 type NodeClientAdapter struct {
 	client KVStoreClient
 }
 
-var _ service.NodeClient = (*NodeClientAdapter)(nil)
+var _ coordinator.NodeClient = (*NodeClientAdapter)(nil)
 
 // NewNodeClientAdapter connects to addr and returns an adapter ready for use.
 func NewNodeClientAdapter(addr string) (*NodeClientAdapter, error) {
@@ -56,7 +56,7 @@ func (a *NodeClientAdapter) ForwardDelete(ctx context.Context, key string) error
 	resp, err := a.client.ForwardDelete(ctx, &ForwardDeleteRequest{Key: key})
 	if err != nil {
 		if isNotFound(err) {
-			return service.ErrNotFound
+			return coordinator.ErrNotFound
 		}
 		return err
 	}
@@ -66,7 +66,7 @@ func (a *NodeClientAdapter) ForwardDelete(ctx context.Context, key string) error
 	return nil
 }
 
-func (a *NodeClientAdapter) ReplicateEntry(ctx context.Context, entry service.LogEntry) error {
+func (a *NodeClientAdapter) ReplicateEntry(ctx context.Context, entry coordinator.LogEntry) error {
 	resp, err := a.client.ReplicateEntry(ctx, &ReplicateEntryRequest{
 		Entry: &LogEntry{
 			SeqNum:    entry.SeqNum,
