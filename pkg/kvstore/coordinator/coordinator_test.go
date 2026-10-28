@@ -66,6 +66,10 @@ func (m *mockNodeClient) ReplaySnapshot(
 }
 
 func setupTestCoordinator(t *testing.T, isLeader bool, leaderClient NodeClient) (*Coordinator, *storageengine.StorageEngine) {
+	return setupTestCoordinatorWithFollowers(t, isLeader, leaderClient, nil)
+}
+
+func setupTestCoordinatorWithFollowers(t *testing.T, isLeader bool, leaderClient NodeClient, followers []NodeClient) (*Coordinator, *storageengine.StorageEngine) {
 	t.Helper()
 	dir := t.TempDir()
 	orig, err := os.Getwd()
@@ -83,7 +87,7 @@ func setupTestCoordinator(t *testing.T, isLeader bool, leaderClient NodeClient) 
 	}
 
 	router := NewShardRouter(nil)
-	coord := NewCoordinator(engine, router, leaderClient, "", "", isLeader, nil)
+	coord := NewCoordinator(engine, router, leaderClient, "", "", isLeader, followers)
 	return coord, engine
 }
 
@@ -180,6 +184,131 @@ func TestRecoverIfNeeded_ReplayErrorPropagates(t *testing.T) {
 	}
 
 	coord, _ := setupTestCoordinator(t, false, mockLeader)
+
+	err := coord.RecoverIfNeeded(context.Background())
+	if !errors.Is(err, sentinel) {
+		t.Errorf("expected error %v, got %v", sentinel, err)
+	}
+}
+
+func TestRecoverIfNeeded_LeaderWithLocalData_DoesNotRecover(t *testing.T) {
+	followerReplayCalled := false
+	mockFollower := &mockNodeClient{
+		getSeqNumFunc: func(ctx context.Context) (uint64, error) {
+			return 100, nil
+		},
+		replaySnapshotFunc: func(ctx context.Context, recoveringSeqNum uint64, onChunk func(donorSeqNum uint64, entries []LogEntry, isLast bool) error) error {
+			followerReplayCalled = true
+			return nil
+		},
+	}
+
+	coord, engine := setupTestCoordinatorWithFollowers(t, true, nil, []NodeClient{mockFollower})
+	// Pre-populate leader with local data
+	if err := engine.Put("existingKey", []byte("val")); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	if err := coord.RecoverIfNeeded(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if followerReplayCalled {
+		t.Errorf("leader with existing local data should not recover from followers")
+	}
+}
+
+func TestRecoverIfNeeded_LeaderEmptyDisk_RecoversFromBestFollower(t *testing.T) {
+	f1ReplayCalled := false
+	f2ReplayCalled := false
+
+	f1 := &mockNodeClient{
+		getSeqNumFunc: func(ctx context.Context) (uint64, error) {
+			return 50, nil
+		},
+		replaySnapshotFunc: func(ctx context.Context, recoveringSeqNum uint64, onChunk func(donorSeqNum uint64, entries []LogEntry, isLast bool) error) error {
+			f1ReplayCalled = true
+			return nil
+		},
+	}
+
+	donorSeq := uint64(120)
+	snapshotEntries := []LogEntry{
+		{Key: "k1", Value: []byte("v1")},
+		{Key: "k2", Value: []byte("v2")},
+	}
+	f2 := &mockNodeClient{
+		getSeqNumFunc: func(ctx context.Context) (uint64, error) {
+			return donorSeq, nil // follower 2 is more up to date
+		},
+		replaySnapshotFunc: func(ctx context.Context, recoveringSeqNum uint64, onChunk func(donorSeqNum uint64, entries []LogEntry, isLast bool) error) error {
+			f2ReplayCalled = true
+			return onChunk(donorSeq, snapshotEntries, true)
+		},
+	}
+
+	coord, engine := setupTestCoordinatorWithFollowers(t, true, nil, []NodeClient{f1, f2})
+
+	if err := coord.RecoverIfNeeded(context.Background()); err != nil {
+		t.Fatalf("RecoverIfNeeded: %v", err)
+	}
+
+	if f1ReplayCalled {
+		t.Errorf("f1 should not have been chosen as donor (has lower seq)")
+	}
+	if !f2ReplayCalled {
+		t.Errorf("f2 should have been chosen as snapshot donor")
+	}
+
+	// Verify entries were applied to leader's local storage engine
+	v1, err := engine.Get("k1")
+	if err != nil || string(v1) != "v1" {
+		t.Errorf("Get(k1) = %q, err = %v; want v1", v1, err)
+	}
+	v2, err := engine.Get("k2")
+	if err != nil || string(v2) != "v2" {
+		t.Errorf("Get(k2) = %q, err = %v; want v2", v2, err)
+	}
+
+	// Verify leader's sequence number was synced
+	if coord.GetSeqNum() != donorSeq {
+		t.Errorf("leader seqnum = %d, want %d", coord.GetSeqNum(), donorSeq)
+	}
+}
+
+func TestRecoverIfNeeded_LeaderEmptyDisk_AllFollowersEmpty(t *testing.T) {
+	replayCalled := false
+	f1 := &mockNodeClient{
+		getSeqNumFunc: func(ctx context.Context) (uint64, error) {
+			return 0, nil
+		},
+		replaySnapshotFunc: func(ctx context.Context, recoveringSeqNum uint64, onChunk func(donorSeqNum uint64, entries []LogEntry, isLast bool) error) error {
+			replayCalled = true
+			return nil
+		},
+	}
+
+	coord, _ := setupTestCoordinatorWithFollowers(t, true, nil, []NodeClient{f1})
+
+	if err := coord.RecoverIfNeeded(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if replayCalled {
+		t.Errorf("ReplaySnapshot should not be called when all followers have seq 0")
+	}
+}
+
+func TestRecoverIfNeeded_LeaderEmptyDisk_FollowerReplayFails(t *testing.T) {
+	sentinel := errors.New("follower replay failed")
+	f1 := &mockNodeClient{
+		getSeqNumFunc: func(ctx context.Context) (uint64, error) {
+			return 100, nil
+		},
+		replaySnapshotFunc: func(ctx context.Context, recoveringSeqNum uint64, onChunk func(donorSeqNum uint64, entries []LogEntry, isLast bool) error) error {
+			return sentinel
+		},
+	}
+
+	coord, _ := setupTestCoordinatorWithFollowers(t, true, nil, []NodeClient{f1})
 
 	err := coord.RecoverIfNeeded(context.Background())
 	if !errors.Is(err, sentinel) {

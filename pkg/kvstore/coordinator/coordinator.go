@@ -202,12 +202,56 @@ func (c *Coordinator) ApplySnapshot(donorSeqNum uint64, entries []LogEntry, isFi
 	return nil
 }
 
-// RecoverIfNeeded checks if this node is a follower that needs to synchronize
-// its data with the shard leader. If the node has no local data on disk or its
-// sequence number is behind the leader, it streams and applies a snapshot from the leader.
+// RecoverIfNeeded checks if this node needs to synchronize state with shard peers:
+//   - If this node is a leader with no local data on disk (clean start / disk wipe),
+//     it queries all followers to find the one with the highest sequence number and
+//     recovers the full snapshot from that follower (peer-assisted leader recovery).
+//   - If this node is a follower, it checks with the shard leader and applies a snapshot
+//     if it has no local data or its sequence number is behind.
 func (c *Coordinator) RecoverIfNeeded(ctx context.Context) error {
-	if c.isLeader.Load() || c.leaderClient == nil {
-		return nil // Leaders and standalone nodes do not recover from a peer
+	stats := c.engine.Stats()
+	hasLocalData := stats.SstableDiskUsageBytes > 0 || stats.WalSizeBytes > 0 || stats.MemtableSizeBytes > 0 || stats.KeysTotal > 0
+
+	// Leader Recovery: Peer-assisted recovery from most up-to-date follower
+
+	if c.isLeader.Load() {
+		// If the leader already has local data, it recovered from its own WAL/SSTables.
+		if hasLocalData || len(c.followers) == 0 {
+			return nil
+		}
+
+		var bestPeer NodeClient
+		var maxSeq uint64
+
+		// Poll all followers to find the one with the highest sequence number
+		for _, follower := range c.followers {
+			seq, err := follower.GetSeqNum(ctx)
+			if err != nil {
+				log.Printf("RecoverIfNeeded: failed to get seqnum from follower: %v", err)
+				continue
+			}
+			if seq > maxSeq {
+				maxSeq = seq
+				bestPeer = follower
+			}
+		}
+
+		if bestPeer != nil && maxSeq > 0 {
+			log.Printf("RecoverIfNeeded: leader disk is empty; recovering from follower with highest seq=%d...", maxSeq)
+			if err := bestPeer.ReplaySnapshot(ctx, 0, c.ApplySnapshot); err != nil {
+				return fmt.Errorf("RecoverIfNeeded: leader recovery from follower failed: %w", err)
+			}
+			log.Printf("RecoverIfNeeded: leader successfully recovered state up to seq=%d.", c.GetSeqNum())
+		}
+
+		return nil
+	}
+
+	// -------------------------------------------------------------------------
+	// 2. Follower Recovery: Recover from shard leader
+	// -------------------------------------------------------------------------
+	if c.leaderClient == nil {
+		return nil
 	}
 
 	leaderSeq, err := c.leaderClient.GetSeqNum(ctx)
@@ -215,8 +259,6 @@ func (c *Coordinator) RecoverIfNeeded(ctx context.Context) error {
 		return fmt.Errorf("RecoverIfNeeded: query leader seqnum: %w", err)
 	}
 
-	stats := c.engine.Stats()
-	hasLocalData := stats.SstableDiskUsageBytes > 0 || stats.WalSizeBytes > 0 || stats.MemtableSizeBytes > 0 || stats.KeysTotal > 0
 	mySeq := c.GetSeqNum()
 
 	// If the leader has data (leaderSeq > 0) and this node has no data on disk

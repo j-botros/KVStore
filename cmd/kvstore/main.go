@@ -172,11 +172,13 @@ func main() {
 
 	coord := coordinator.NewCoordinator(engine, router, leaderClient, minKey, maxKey, isLeader, followers)
 
-	// If this node is a follower, check if it needs to recover state from the leader before serving traffic.
-	if !isLeader && leaderClient != nil {
+	// Check if this node needs to recover state from peers before serving traffic:
+	// - Follower recovery: recovers from the leader if empty or behind.
+	// - Peer-assisted leader recovery: recovers from the most up-to-date follower if empty.
+	if (!isLeader && leaderClient != nil) || (isLeader && len(followers) > 0) {
 		recoveryCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		if err := coord.RecoverIfNeeded(recoveryCtx); err != nil {
-			log.Printf("Warning: startup recovery from leader failed: %v", err)
+			log.Printf("Warning: startup recovery failed: %v", err)
 		}
 		cancel()
 	}
