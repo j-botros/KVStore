@@ -74,6 +74,34 @@ Extensive testing suite for the engine. `testhelpers_test.go` provides mock conf
 
 ---
 
+## Testing
+
+Run from the repository root:
+
+```bash
+# All storage engine tests
+go test ./pkg/kvstore/storageEngine -v -count=1
+
+# With the race detector (recommended for flush/compaction/concurrency tests)
+go test ./pkg/kvstore/storageEngine -race -count=1
+
+# Tests for one component, by name prefix
+go test ./pkg/kvstore/storageEngine -run 'TestNewWal|TestWriteLog|TestReplayWal' -v -count=1   # WAL
+go test ./pkg/kvstore/storageEngine -run 'TestNewNode|TestNewMemtable|TestMemtable|TestRandomLevel' -v -count=1  # memtable
+go test ./pkg/kvstore/storageEngine -run 'TestNewSst|TestNewBlock|TestSst|TestSstables|TestReplaySst|TestRebuildSstables|TestIndex' -v -count=1  # SSTables
+go test ./pkg/kvstore/storageEngine -run 'TestCompact' -v -count=1                  # compaction
+go test ./pkg/kvstore/storageEngine -run 'TestNewBloomFilter|TestBloomFilter|TestSetBloomBits|TestKeyNotPresent' -v -count=1  # bloom filter
+go test ./pkg/kvstore/storageEngine -run TestScan -v -count=1                       # Scan
+go test ./pkg/kvstore/storageEngine -run 'TestStorageEngine|TestRebuildEngine|TestOpenStorageEngine' -v -count=1  # engine
+
+# A single test
+go test ./pkg/kvstore/storageEngine -run TestScan_SortedOrder -v -count=1
+```
+
+Tests that touch disk call `setupTestDir(t)`, which changes the working directory into a temp dir, because the WAL and SSTables use relative `data/` paths. Don't mark those tests `t.Parallel()`.
+
+---
+
 ## Future TODOs
 
 ### Snapshot Isolation for `Scan` (Write-Blocking Issue)

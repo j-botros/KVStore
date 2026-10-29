@@ -48,7 +48,9 @@ Ensure you have a valid `config.json` in your working directory, then start the 
 
 ```bash
 # Set a value
-curl -X POST -d "my-value" http://localhost:8080/kv/my-key
+curl -X POST -H "Content-Type: application/json" \
+  -d '{"key": "my-key", "value": "my-value"}' \
+  http://localhost:8080/kv
 
 # Get a value
 curl http://localhost:8080/kv/my-key
@@ -61,6 +63,35 @@ curl -X DELETE http://localhost:8080/kv/my-key
 
 The project includes an extensive test suite verifying concurrent access, correct merging of SSTables, tombstone pruning, memtable rotation, and atomic compaction.
 
+Run all commands from the repository root. `-count=1` disables Go's test cache so tests always re-run.
+
 ```bash
-go test ./pkg/kvstore/storageEngine/... -v -count=1
+# All unit tests
+go test ./... -count=1
+
+# All unit tests with the race detector (recommended; the engine is heavily concurrent)
+go test ./... -race -count=1
+
+# Verbose output (each test name and result)
+go test ./... -v -count=1
+
+# Integration tests (multi-node, end-to-end); gated behind a build tag
+go test -tags integration ./test/integration/... -count=1 -v
+
+# Unit + integration tests together
+go test -tags integration ./... -count=1
 ```
+
+To run a single test, use `-run` with a regex matching the test name:
+
+```bash
+go test ./pkg/kvstore/storageEngine -run TestScan_SortedOrder -v -count=1
+```
+
+Each component's README has the commands for its own tests:
+
+- [`pkg/kvstore/storageEngine`](pkg/kvstore/storageEngine/README.md#testing)
+- [`pkg/kvstore/coordinator`](pkg/kvstore/coordinator/README.md#testing)
+- [`pkg/kvstore/interface/http`](pkg/kvstore/interface/http/README.md#testing)
+- [`pkg/kvstore/interface/grpc`](pkg/kvstore/interface/grpc/README.md#testing)
+- [`cmd/kvstore`](cmd/kvstore/README.md#testing)

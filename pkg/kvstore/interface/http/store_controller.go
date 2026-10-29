@@ -30,7 +30,7 @@ func NewStoreController(coordinator *coordinator.Coordinator, timeouts StoreTime
 // Register the routes
 func (c *StoreController) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /kv/{key}", c.handleGet)
-	mux.HandleFunc("POST /kv/{key}", c.handlePut)
+	mux.HandleFunc("POST /kv", c.handlePut)
 	mux.HandleFunc("DELETE /kv/{key}", c.handleDelete)
 }
 
@@ -67,6 +67,7 @@ func (c *StoreController) handleGet(w http.ResponseWriter, r *http.Request) {
 }
 
 type putRequest struct {
+	Key   string `json:"key"`
 	Value string `json:"value"`
 }
 
@@ -80,16 +81,18 @@ func (c *StoreController) handlePut(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), c.timeouts.Put)
 	defer cancel()
 
-	key := r.PathValue("key")
-
 	var body putRequest
 	err := json.NewDecoder(r.Body).Decode(&body)
 	if err != nil {
 		http.Error(w, "failed to read body", http.StatusBadRequest)
 		return
 	}
+	if body.Key == "" {
+		http.Error(w, "key is required", http.StatusBadRequest)
+		return
+	}
 
-	err = c.coordinator.Put(ctx, key, []byte(body.Value))
+	err = c.coordinator.Put(ctx, body.Key, []byte(body.Value))
 	if err != nil {
 		http.Error(w, "failed to put key-value", http.StatusInternalServerError)
 		return

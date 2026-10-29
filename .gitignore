@@ -28,3 +28,9 @@ go.work.sum
 .idea/
 *.swp
 *.swo
+
+# Claude
+claude.md
+prompts/
+.claude/
+tmp-designs/

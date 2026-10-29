@@ -113,6 +113,28 @@ Callers in `interface/http` and `interface/grpc` use `errors.Is(err, coordinator
 
 ---
 
+## Testing
+
+Run from the repository root:
+
+```bash
+# All coordinator tests
+go test ./pkg/kvstore/coordinator -v -count=1
+
+# With the race detector (replication is asynchronous)
+go test ./pkg/kvstore/coordinator -race -count=1
+
+# Startup recovery tests only
+go test ./pkg/kvstore/coordinator -run TestRecoverIfNeeded -v -count=1
+
+# A single test
+go test ./pkg/kvstore/coordinator -run TestRecoverIfNeeded_FollowerRecoversEmptyDisk -v -count=1
+```
+
+Tests use `mockNodeClient` (in `coordinator_test.go`) in place of real gRPC peers, backed by a real storage engine in a temp directory.
+
+---
+
 ## TODO
 
 - **Replication (`ReplicateEntry`)**: After a leader applies a write, it should fan out the change to all followers as a fire-and-forget background gRPC call using `NodeClient.ReplicateEntry`. Followers need a dedicated apply path that writes directly to the storage engine, bypassing the `isLeader` guard.

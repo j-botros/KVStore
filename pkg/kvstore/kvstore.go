@@ -62,7 +62,7 @@ func (kvstore *KVStore) Start(httpPort int, grpcPort int) error {
 			"node_id": "` + kvstore.nodeId + `",
 			"endpoints": {
 				"GET /kv/{key}": "retrieve value",
-				"POST /kv/{key}": "set key/value",
+				"POST /kv": "set key/value (JSON body: {\"key\": ..., \"value\": ...})",
 				"DELETE /kv/{key}": "delete key"
 			}
 		}`))

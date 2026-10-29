@@ -10,8 +10,6 @@ import (
 	"log"
 	"os"
 	"time"
-
-	"gopkg.in/yaml.v3"
 )
 
 func main() {
@@ -24,17 +22,9 @@ func main() {
 		log.Fatalf("Failed to read config.yaml: %v", err)
 	}
 
-	var config config
-	err = yaml.Unmarshal(configFile, &config)
+	config, err := loadConfig(configFile)
 	if err != nil {
-		log.Fatalf("Failed to parse config.yaml: %v", err)
-	}
-
-	if config.storage.l0SizeMb == 0 {
-		log.Fatalf("Invalid configuration: level0_max_size_mb must be greater than 0")
-	}
-	if config.storage.lvlGrowthFactor <= 1 {
-		log.Fatalf("Invalid configuration: level_size_multiplier must be greater than 1")
+		log.Fatalf("%v", err)
 	}
 
 	engine, err := storageengine.OpenStorageEngine(
@@ -47,30 +37,9 @@ func main() {
 		log.Fatalf("Failed to open storage engine: %v", err)
 	}
 
-	// Determine this node's key range and leadership role from the shard config.
-	var minKey, maxKey string
-	isLeader := false
-	var followerIds []string
-	for _, shard := range config.cluster.shards {
-		if shard.leader == config.server.nodeId {
-			minKey = shard.startKey
-			maxKey = shard.endKey
-			isLeader = true
-			followerIds = shard.followers
-			break
-		}
-		for _, follower := range shard.followers {
-			if follower == config.server.nodeId {
-				minKey = shard.startKey
-				maxKey = shard.endKey
-				// isLeader stays false
-				break
-			}
-		}
-		if minKey != "" {
-			break
-		}
-	}
+	// Determine this node's key range, leadership role, and remote shards.
+	topo := resolveTopology(config, config.server.nodeId)
+	minKey, maxKey, isLeader := topo.minKey, topo.maxKey, topo.isLeader
 
 	// Build a lookup of node ID --> gRPC address.
 	nodeAddrs := make(map[string]string, len(config.cluster.nodes))
@@ -81,7 +50,7 @@ func main() {
 	// Build a NodeClientAdapter for each follower of this shard (leader only).
 	var followers []coordinator.NodeClient
 	if isLeader {
-		for _, followerId := range followerIds {
+		for _, followerId := range topo.followerIDs {
 			addr, ok := nodeAddrs[followerId]
 			if !ok {
 				log.Fatalf("No gRPC address found for follower node %q", followerId)
@@ -97,21 +66,7 @@ func main() {
 	// Build a ShardRouter for forwarding reads and writes to remote shards.
 	// Reads round-robin across all nodes; writes always target the shard leader.
 	var routerConfigs []coordinator.ShardNodeConfig
-	for _, shard := range config.cluster.shards {
-		// Skip this node's own shard — handled locally by Coordinator.
-		isThisShard := shard.leader == config.server.nodeId
-		if !isThisShard {
-			for _, f := range shard.followers {
-				if f == config.server.nodeId {
-					isThisShard = true
-					break
-				}
-			}
-		}
-		if isThisShard {
-			continue
-		}
-
+	for _, shard := range topo.remoteShards {
 		leaderAddr, ok := nodeAddrs[shard.leader]
 		if !ok {
 			log.Fatalf("No gRPC address found for shard leader %q", shard.leader)
@@ -145,29 +100,16 @@ func main() {
 
 	// Build a leaderClient so followers of this shard can proxy writes to the leader.
 	var leaderClient coordinator.NodeClient
-	if !isLeader {
-		for _, shard := range config.cluster.shards {
-			isMyFollowerShard := false
-			for _, f := range shard.followers {
-				if f == config.server.nodeId {
-					isMyFollowerShard = true
-					break
-				}
-			}
-			if !isMyFollowerShard {
-				continue
-			}
-			addr, ok := nodeAddrs[shard.leader]
-			if !ok {
-				log.Fatalf("No gRPC address for this shard's leader %q", shard.leader)
-			}
-			adapter, adapterErr := grpcInterface.NewNodeClientAdapter(addr)
-			if adapterErr != nil {
-				log.Fatalf("Failed to connect to shard leader %s at %s: %v", shard.leader, addr, adapterErr)
-			}
-			leaderClient = adapter
-			break
+	if !isLeader && topo.leaderID != "" {
+		addr, ok := nodeAddrs[topo.leaderID]
+		if !ok {
+			log.Fatalf("No gRPC address for this shard's leader %q", topo.leaderID)
 		}
+		adapter, adapterErr := grpcInterface.NewNodeClientAdapter(addr)
+		if adapterErr != nil {
+			log.Fatalf("Failed to connect to shard leader %s at %s: %v", topo.leaderID, addr, adapterErr)
+		}
+		leaderClient = adapter
 	}
 
 	coord := coordinator.NewCoordinator(engine, router, leaderClient, minKey, maxKey, isLeader, followers)
