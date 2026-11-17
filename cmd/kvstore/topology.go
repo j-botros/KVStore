@@ -13,10 +13,10 @@ func loadConfig(data []byte) (config, error) {
 		return config{}, fmt.Errorf("Failed to parse config.yaml: %w", err)
 	}
 
-	if cfg.storage.l0SizeMb == 0 {
+	if cfg.Storage.L0SizeMb == 0 {
 		return config{}, fmt.Errorf("Invalid configuration: level0_max_size_mb must be greater than 0")
 	}
-	if cfg.storage.lvlGrowthFactor <= 1 {
+	if cfg.Storage.LvlGrowthFactor <= 1 {
 		return config{}, fmt.Errorf("Invalid configuration: level_size_multiplier must be greater than 1")
 	}
 	return cfg, nil
@@ -38,18 +38,18 @@ func resolveTopology(cfg config, nodeID string) topology {
 	var t topology
 
 	// Determine this node's key range and leadership role from the shard config.
-	for _, shard := range cfg.cluster.shards {
-		if shard.leader == nodeID {
-			t.minKey = shard.startKey
-			t.maxKey = shard.endKey
+	for _, shard := range cfg.Cluster.Shards {
+		if shard.Leader == nodeID {
+			t.minKey = shard.StartKey
+			t.maxKey = shard.EndKey
 			t.isLeader = true
-			t.followerIDs = shard.followers
+			t.followerIDs = shard.Followers
 			break
 		}
-		for _, follower := range shard.followers {
+		for _, follower := range shard.Followers {
 			if follower == nodeID {
-				t.minKey = shard.startKey
-				t.maxKey = shard.endKey
+				t.minKey = shard.StartKey
+				t.maxKey = shard.EndKey
 				// isLeader stays false
 				break
 			}
@@ -60,11 +60,11 @@ func resolveTopology(cfg config, nodeID string) topology {
 	}
 
 	// Collect remote shards for the ShardRouter.
-	for _, shard := range cfg.cluster.shards {
+	for _, shard := range cfg.Cluster.Shards {
 		// Skip this node's own shard — handled locally by Coordinator.
-		isThisShard := shard.leader == nodeID
+		isThisShard := shard.Leader == nodeID
 		if !isThisShard {
-			for _, f := range shard.followers {
+			for _, f := range shard.Followers {
 				if f == nodeID {
 					isThisShard = true
 					break
@@ -79,9 +79,9 @@ func resolveTopology(cfg config, nodeID string) topology {
 
 	// Find this shard's leader so followers can proxy writes to it.
 	if !t.isLeader {
-		for _, shard := range cfg.cluster.shards {
+		for _, shard := range cfg.Cluster.Shards {
 			isMyFollowerShard := false
-			for _, f := range shard.followers {
+			for _, f := range shard.Followers {
 				if f == nodeID {
 					isMyFollowerShard = true
 					break
@@ -90,7 +90,7 @@ func resolveTopology(cfg config, nodeID string) topology {
 			if !isMyFollowerShard {
 				continue
 			}
-			t.leaderID = shard.leader
+			t.leaderID = shard.Leader
 			break
 		}
 	}

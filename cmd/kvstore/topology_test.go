@@ -41,14 +41,14 @@ func TestLoadConfig_RepoConfig(t *testing.T) {
 		name      string
 		got, want any
 	}{
-		{"server.node_id", cfg.server.nodeId, "kvstore-0"},
-		{"server.http_port", cfg.server.httpPort, 8080},
-		{"server.grpc_port", cfg.server.grpcPort, 9090},
-		{"server.timeouts.put_timeout_s", cfg.server.timeouts.putTimeoutS, 10},
-		{"storage.level0_max_size_mb", cfg.storage.l0SizeMb, uint64(256)},
-		{"storage.level_size_multiplier", cfg.storage.lvlGrowthFactor, 10},
-		{"len(cluster.nodes)", len(cfg.cluster.nodes), 3},
-		{"len(cluster.shards)", len(cfg.cluster.shards), 3},
+		{"server.node_id", cfg.Server.NodeId, "kvstore-0"},
+		{"server.http_port", cfg.Server.HttpPort, 8080},
+		{"server.grpc_port", cfg.Server.GrpcPort, 9090},
+		{"server.Timeouts.put_timeout_s", cfg.Server.Timeouts.PutTimeoutS, 10},
+		{"storage.level0_max_size_mb", cfg.Storage.L0SizeMb, uint64(256)},
+		{"storage.level_size_multiplier", cfg.Storage.LvlGrowthFactor, 10},
+		{"len(cluster.nodes)", len(cfg.Cluster.Nodes), 3},
+		{"len(cluster.shards)", len(cfg.Cluster.Shards), 3},
 	}
 	for _, c := range checks {
 		if c.got != c.want {
@@ -118,16 +118,16 @@ func TestLoadConfig_ValidStorageOnly(t *testing.T) {
 // repoClusterConfig mirrors the repo config.yaml: every node is in every shard.
 func repoClusterConfig() config {
 	return config{
-		cluster: clusterConfig{
-			nodes: []nodeConfig{
-				{id: "kvstore-0", grpcAddr: "kvstore-0:9090"},
-				{id: "kvstore-1", grpcAddr: "kvstore-1:9090"},
-				{id: "kvstore-2", grpcAddr: "kvstore-2:9090"},
+		Cluster: clusterConfig{
+			Nodes: []nodeConfig{
+				{Id: "kvstore-0", GrpcAddr: "kvstore-0:9090"},
+				{Id: "kvstore-1", GrpcAddr: "kvstore-1:9090"},
+				{Id: "kvstore-2", GrpcAddr: "kvstore-2:9090"},
 			},
-			shards: []shardConfig{
-				{id: "shard-1", startKey: "", endKey: "I", leader: "kvstore-0", followers: []string{"kvstore-1", "kvstore-2"}},
-				{id: "shard-2", startKey: "I", endKey: "Q", leader: "kvstore-1", followers: []string{"kvstore-0", "kvstore-2"}},
-				{id: "shard-3", startKey: "Q", endKey: "", leader: "kvstore-2", followers: []string{"kvstore-0", "kvstore-1"}},
+			Shards: []shardConfig{
+				{Id: "shard-1", StartKey: "", EndKey: "I", Leader: "kvstore-0", Followers: []string{"kvstore-1", "kvstore-2"}},
+				{Id: "shard-2", StartKey: "I", EndKey: "Q", Leader: "kvstore-1", Followers: []string{"kvstore-0", "kvstore-2"}},
+				{Id: "shard-3", StartKey: "Q", EndKey: "", Leader: "kvstore-2", Followers: []string{"kvstore-0", "kvstore-1"}},
 			},
 		},
 	}
@@ -136,10 +136,10 @@ func repoClusterConfig() config {
 // disjointClusterConfig has each node in exactly one shard.
 func disjointClusterConfig() config {
 	return config{
-		cluster: clusterConfig{
-			shards: []shardConfig{
-				{id: "s1", startKey: "", endKey: "M", leader: "a", followers: []string{"b"}},
-				{id: "s2", startKey: "M", endKey: "", leader: "c", followers: []string{"d"}},
+		Cluster: clusterConfig{
+			Shards: []shardConfig{
+				{Id: "s1", StartKey: "", EndKey: "M", Leader: "a", Followers: []string{"b"}},
+				{Id: "s2", StartKey: "M", EndKey: "", Leader: "c", Followers: []string{"d"}},
 			},
 		},
 	}
@@ -151,8 +151,8 @@ func inRange(key, min, max string) bool {
 
 // shardFor returns the shard in cfg that owns key.
 func shardFor(cfg config, key string) shardConfig {
-	for _, s := range cfg.cluster.shards {
-		if inRange(key, s.startKey, s.endKey) {
+	for _, s := range cfg.Cluster.Shards {
+		if inRange(key, s.StartKey, s.EndKey) {
 			return s
 		}
 	}
@@ -166,7 +166,7 @@ func routable(topo topology, key string) bool {
 		return true
 	}
 	for _, s := range topo.remoteShards {
-		if inRange(key, s.startKey, s.endKey) {
+		if inRange(key, s.StartKey, s.EndKey) {
 			return true
 		}
 	}
@@ -208,7 +208,7 @@ func TestResolveTopology_DisjointShards(t *testing.T) {
 			}
 			var gotRemote []string
 			for _, s := range topo.remoteShards {
-				gotRemote = append(gotRemote, s.id)
+				gotRemote = append(gotRemote, s.Id)
 			}
 			if !slices.Equal(gotRemote, tc.remoteShardIDs) {
 				t.Errorf("remoteShards = %v, want %v", gotRemote, tc.remoteShardIDs)
@@ -232,7 +232,7 @@ func TestResolveTopology_RepoLayout_EveryKeyRoutable(t *testing.T) {
 			var unroutable []string
 			for _, k := range boundaryKeys {
 				if !routable(topo, k) {
-					unroutable = append(unroutable, k+"("+shardFor(cfg, k).id+")")
+					unroutable = append(unroutable, k+"("+shardFor(cfg, k).Id+")")
 				}
 			}
 			if len(unroutable) > 0 {
@@ -247,13 +247,13 @@ func TestResolveTopology_RepoLayout_EveryKeyRoutable(t *testing.T) {
 // A node that leads a shard must resolve as that shard's leader, owning its range.
 func TestResolveTopology_RepoLayout_LeaderRole(t *testing.T) {
 	cfg := repoClusterConfig()
-	for _, s := range cfg.cluster.shards {
-		t.Run(s.leader, func(t *testing.T) {
-			topo := resolveTopology(cfg, s.leader)
-			if !topo.isLeader || topo.minKey != s.startKey || topo.maxKey != s.endKey {
+	for _, s := range cfg.Cluster.Shards {
+		t.Run(s.Leader, func(t *testing.T) {
+			topo := resolveTopology(cfg, s.Leader)
+			if !topo.isLeader || topo.minKey != s.StartKey || topo.maxKey != s.EndKey {
 				t.Errorf("BUG B-6 (node resolves to the wrong shard/role when it is in several shards): "+
 					"got isLeader=%v range [%q,%q), want leader of %s range [%q,%q)",
-					topo.isLeader, topo.minKey, topo.maxKey, s.id, s.startKey, s.endKey)
+					topo.isLeader, topo.minKey, topo.maxKey, s.Id, s.StartKey, s.EndKey)
 			}
 		})
 	}
@@ -271,9 +271,9 @@ func TestResolveTopology_RepoLayout_LeaderIDMatchesRange(t *testing.T) {
 				return
 			}
 			var want string
-			for _, s := range cfg.cluster.shards {
-				if s.startKey == topo.minKey && s.endKey == topo.maxKey {
-					want = s.leader
+			for _, s := range cfg.Cluster.Shards {
+				if s.StartKey == topo.minKey && s.EndKey == topo.maxKey {
+					want = s.Leader
 				}
 			}
 			if topo.leaderID != want {

@@ -534,7 +534,7 @@ func TestReplication_ConcurrentOverwrites_ReplicasConverge_Stress(t *testing.T) 
 		go func(w int) {
 			defer wg.Done()
 			for i := 0; i < perWriter; i++ {
-				if err := leader.Put(context.Background(), "k", []byte(fmt.Sprintf("w%d-%d", w, i))); err != nil {
+				if err := leader.Put(context.Background(), "k", fmt.Appendf(nil, "w%d-%d", w, i)); err != nil {
 					t.Error(err)
 					return
 				}

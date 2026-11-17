@@ -305,7 +305,7 @@ func TestGRPC_GetSeqNum(t *testing.T) {
 func seed(t *testing.T, coord *coordinator.Coordinator, n int) {
 	t.Helper()
 	for i := 0; i < n; i++ {
-		if err := coord.Put(context.Background(), fmt.Sprintf("key-%05d", i), []byte(fmt.Sprintf("val-%d", i))); err != nil {
+		if err := coord.Put(context.Background(), fmt.Sprintf("key-%05d", i), fmt.Appendf(nil, "val-%d", i)); err != nil {
 			t.Fatal(err)
 		}
 	}
