@@ -1553,7 +1553,7 @@ func TestEngine_KeysTotal_InsertAndDelete(t *testing.T) {
 func TestEngine_KeysTotal_OverwriteCountsOnce(t *testing.T) {
 	e := newTestEngine(t)
 	for i := 0; i < 3; i++ {
-		e.Put("a", []byte(fmt.Sprint(i)))
+		e.Put("a", fmt.Append(nil, i))
 	}
 	if got := e.Stats().KeysTotal; got != 1 {
 		t.Fatalf("BUG B-7 (KeysTotal counts every Put, not live keys): got %d after writing one key 3 times, want 1", got)
@@ -1727,7 +1727,7 @@ func TestEngine_Compaction_LevelsUnderCapacityWhenQuiet_Stress(t *testing.T) {
 	e.sstables.mu.Unlock()
 	for i := 0; i < 40; i++ {
 		for j := 0; j < 3; j++ {
-			e.Put(fmt.Sprintf("k%03d", (i*3+j)%60), []byte(fmt.Sprintf("v%d", i)))
+			e.Put(fmt.Sprintf("k%03d", (i*3+j)%60), fmt.Appendf(nil, "v%d", i))
 		}
 		if err := e.flush(); err != nil {
 			t.Fatal(err)
@@ -1755,7 +1755,7 @@ func churn(t *testing.T, e *StorageEngine, stop <-chan struct{}, done chan<- str
 		default:
 		}
 		for j := 0; j < 3; j++ {
-			if err := e.Put(fmt.Sprintf("k%03d", (i*3+j)%60), []byte(fmt.Sprintf("v%d", i))); err != nil {
+			if err := e.Put(fmt.Sprintf("k%03d", (i*3+j)%60), fmt.Appendf(nil, "v%d", i)); err != nil {
 				t.Error(err)
 				return
 			}
